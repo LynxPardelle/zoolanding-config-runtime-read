@@ -216,6 +216,19 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["metadata"]["fallbackFromDomain"], "missing.example")
         self.assertEqual(body["metadata"]["statusCode"], 404)
 
+    def test_missing_test_domain_uses_canonical_test_404(self):
+        response = self.handler.lambda_handler(event("test.missing.example", "/missing", "en"), Context())
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["domain"], "zoolandingpage.com.mx")
+        self.assertEqual(body["environment"], "test")
+        self.assertEqual(body["versionId"], "canonical-test-v1")
+        self.assertEqual(body["pageId"], "not-found")
+        self.assertEqual(body["metadata"]["requestedDomain"], "test.missing.example")
+        self.assertEqual(body["metadata"]["fallbackFromDomain"], "test.missing.example")
+        self.assertEqual(body["metadata"]["statusCode"], 404)
+
     def test_test_alias_falls_back_to_canonical_404_if_no_test_pointer_exists(self):
         self.metadata["publishedEnvironments"].pop("test")
         response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())

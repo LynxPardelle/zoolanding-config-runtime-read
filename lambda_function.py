@@ -88,6 +88,11 @@ def _normalize_environment(value: Any) -> str:
     return "production"
 
 
+def _infer_environment_from_domain(domain: str) -> str:
+    normalized = normalize_domain(domain)
+    return "test" if normalized.startswith("test.") else "production"
+
+
 def _normalize_environment_aliases(value: Any) -> Dict[str, list[str]]:
     if not isinstance(value, dict):
         return {}
@@ -559,7 +564,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 requested_domain=requested_domain,
                 path=path,
                 lang=lang,
-                environment=environment,
+                environment=_infer_environment_from_domain(requested_domain),
                 fallback_from_domain=requested_domain,
             )
 
