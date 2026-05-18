@@ -11,11 +11,11 @@ def parse(response):
     return json.loads(response["body"])
 
 
-def event(host):
+def event(host, path="/", lang="es"):
     return {
         "headers": {"host": host},
-        "queryStringParameters": {"path": "/", "lang": "es"},
-        "requestContext": {"http": {"path": "/"}},
+        "queryStringParameters": {"path": path, "lang": lang},
+        "requestContext": {"http": {"path": path}},
     }
 
 
@@ -39,8 +39,30 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "test": {"versionId": "test-v1", "prefix": "test-prefix"},
             },
         }
+        self.canonical_metadata = {
+            "pk": "SITE#zoolandingpage.com.mx",
+            "sk": "METADATA",
+            "domain": "zoolandingpage.com.mx",
+            "aliases": ["zoolandingpage.com.mx"],
+            "environmentAliases": {
+                "test": ["test.zoolandingpage.com.mx"]
+            },
+            "defaultPageId": "default",
+            "notFoundPageId": "not-found",
+            "routes": [
+                {"path": "/", "pageId": "default"},
+                {"path": "/404", "pageId": "not-found", "label": "Not found"},
+            ],
+            "lifecycle": {"status": "active"},
+            "published": {"versionId": "canonical-prod-v1", "prefix": "canonical-prod-prefix"},
+            "publishedEnvironments": {
+                "production": {"versionId": "canonical-prod-v1", "prefix": "canonical-prod-prefix"},
+                "test": {"versionId": "canonical-test-v1", "prefix": "canonical-test-prefix"},
+            },
+        }
         self.items = {
             ("SITE#pamelabetancourt.com", "METADATA"): self.metadata,
+            ("SITE#zoolandingpage.com.mx", "METADATA"): self.canonical_metadata,
             ("ALIAS#test.pamelabetancourt.com", "SITE"): {
                 "domain": "pamelabetancourt.com",
                 "alias": "test.pamelabetancourt.com",
@@ -52,23 +74,61 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "environment": "production",
             },
         }
+        self.payloads = {}
         self.loaded_keys = []
+
+        for prefix in ("prod-prefix", "test-prefix"):
+            self.put_site(prefix, "pamelabetancourt.com", include_not_found=True)
+            self.put_page(prefix, "pamelabetancourt.com", "default", "Hero")
+            self.put_page(prefix, "pamelabetancourt.com", "not-found", "Page not found")
+
+        for prefix in ("canonical-prod-prefix", "canonical-test-prefix"):
+            self.put_site(prefix, "zoolandingpage.com.mx", include_not_found=True)
+            self.put_page(prefix, "zoolandingpage.com.mx", "default", "Canonical hero")
+            self.put_page(prefix, "zoolandingpage.com.mx", "not-found", "Canonical 404")
 
         def load_item(_table, pk, sk="METADATA"):
             return self.items.get((pk, sk))
 
         def load_json(_bucket, key):
             self.loaded_keys.append(key)
-            if key.endswith("/site-config.json"):
-                return {"domain": "pamelabetancourt.com", "routes": [{"path": "/", "pageId": "default"}]}
-            if key.endswith("/page-config.json"):
-                return {"pageId": "default", "rootIds": ["hero"]}
-            if key.endswith("/components.json"):
-                return {"components": [{"id": "hero", "type": "text", "config": {"text": "Hero"}}]}
-            return None
+            return self.payloads.get(key)
 
         self.handler.load_item = load_item
         self.handler.load_json_from_s3 = load_json
+
+    def put_payload(self, prefix, domain, relative_path, payload):
+        self.payloads[f"{prefix}/{domain}/{relative_path}"] = payload
+
+    def put_site(self, prefix, domain, include_not_found):
+        routes = [{"path": "/", "pageId": "default"}]
+        payload = {
+            "domain": domain,
+            "defaultPageId": "default",
+            "routes": routes,
+        }
+        if include_not_found:
+            payload["notFoundPageId"] = "not-found"
+            routes.append({"path": "/404", "pageId": "not-found", "label": "Not found"})
+        self.put_payload(prefix, domain, "site-config.json", payload)
+        self.put_payload(prefix, domain, "components.json", {"components": []})
+        self.put_payload(prefix, domain, "variables.json", {"variables": {}})
+        self.put_payload(prefix, domain, "angora-combos.json", {"combos": {}})
+        self.put_payload(prefix, domain, "i18n/es.json", {"lang": "es", "dictionary": {"shared": "Compartido"}})
+        self.put_payload(prefix, domain, "i18n/en.json", {"lang": "en", "dictionary": {"shared": "Shared"}})
+
+    def put_page(self, prefix, domain, page_id, text):
+        self.put_payload(prefix, domain, f"{page_id}/page-config.json", {"pageId": page_id, "rootIds": ["hero"]})
+        self.put_payload(
+            prefix,
+            domain,
+            f"{page_id}/components.json",
+            {"pageId": page_id, "components": [{"id": "hero", "type": "text", "config": {"text": text}}]},
+        )
+        self.put_payload(prefix, domain, f"{page_id}/variables.json", {"pageId": page_id, "variables": {}})
+        self.put_payload(prefix, domain, f"{page_id}/angora-combos.json", {"pageId": page_id, "combos": {}})
+        self.put_payload(prefix, domain, f"{page_id}/i18n/es.json", {"pageId": page_id, "lang": "es", "dictionary": {"title": f"{text} ES"}})
+        self.put_payload(prefix, domain, f"{page_id}/i18n/en.json", {"pageId": page_id, "lang": "en", "dictionary": {"title": f"{text} EN"}})
 
     def test_test_alias_uses_test_published_pointer(self):
         response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
@@ -77,6 +137,9 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(body["environment"], "test")
         self.assertEqual(body["versionId"], "test-v1")
+        self.assertEqual(body["pageId"], "default")
+        self.assertEqual(body["metadata"]["statusCode"], 200)
+        self.assertFalse(body["metadata"]["notFound"])
         self.assertTrue(any(key.startswith("test-prefix/") for key in self.loaded_keys))
 
     def test_production_alias_uses_production_pointer(self):
@@ -86,15 +149,83 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(body["environment"], "production")
         self.assertEqual(body["versionId"], "prod-v1")
+        self.assertEqual(body["pageId"], "default")
         self.assertTrue(any(key.startswith("prod-prefix/") for key in self.loaded_keys))
 
-    def test_test_alias_fails_if_no_test_pointer_exists(self):
-        self.metadata["publishedEnvironments"].pop("test")
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+    def test_unknown_route_uses_configured_not_found_page_id(self):
+        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())
         body = parse(response)
 
-        self.assertEqual(response["statusCode"], 404)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["domain"], "pamelabetancourt.com")
+        self.assertEqual(body["pageId"], "not-found")
+        self.assertEqual(body["route"]["path"], "/404")
+        self.assertEqual(body["metadata"]["resolvedPath"], "/missing")
+        self.assertEqual(body["metadata"]["statusCode"], 404)
+        self.assertTrue(body["metadata"]["notFound"])
+        self.assertEqual(body["i18n"]["lang"], "en")
+        self.assertIn("test-prefix/pamelabetancourt.com/not-found/page-config.json", self.loaded_keys)
+
+    def test_unknown_route_uses_404_route_when_not_found_page_id_is_omitted(self):
+        self.metadata.pop("notFoundPageId", None)
+        for prefix in ("prod-prefix", "test-prefix"):
+            self.payloads[f"{prefix}/pamelabetancourt.com/site-config.json"].pop("notFoundPageId", None)
+
+        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing"), Context())
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["pageId"], "not-found")
+        self.assertEqual(body["route"]["path"], "/404")
+        self.assertEqual(body["metadata"]["statusCode"], 404)
+
+    def test_unknown_route_does_not_fall_back_to_default_page_id(self):
+        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing"), Context())
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertNotEqual(body["pageId"], body["siteConfig"]["defaultPageId"])
+        self.assertEqual(body["pageId"], "not-found")
+
+    def test_unknown_route_falls_back_to_canonical_404_when_draft_has_no_404(self):
+        self.metadata["routes"] = [{"path": "/", "pageId": "default"}]
+        for prefix in ("prod-prefix", "test-prefix"):
+            self.put_site(prefix, "pamelabetancourt.com", include_not_found=False)
+
+        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["domain"], "zoolandingpage.com.mx")
         self.assertEqual(body["environment"], "test")
+        self.assertEqual(body["versionId"], "canonical-test-v1")
+        self.assertEqual(body["pageId"], "not-found")
+        self.assertEqual(body["metadata"]["requestedDomain"], "test.pamelabetancourt.com")
+        self.assertEqual(body["metadata"]["fallbackFromDomain"], "pamelabetancourt.com")
+        self.assertEqual(body["metadata"]["statusCode"], 404)
+
+    def test_missing_domain_uses_canonical_404(self):
+        response = self.handler.lambda_handler(event("missing.example", "/missing", "en"), Context())
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["domain"], "zoolandingpage.com.mx")
+        self.assertEqual(body["environment"], "production")
+        self.assertEqual(body["pageId"], "not-found")
+        self.assertEqual(body["metadata"]["requestedDomain"], "missing.example")
+        self.assertEqual(body["metadata"]["fallbackFromDomain"], "missing.example")
+        self.assertEqual(body["metadata"]["statusCode"], 404)
+
+    def test_test_alias_falls_back_to_canonical_404_if_no_test_pointer_exists(self):
+        self.metadata["publishedEnvironments"].pop("test")
+        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["domain"], "zoolandingpage.com.mx")
+        self.assertEqual(body["environment"], "test")
+        self.assertEqual(body["versionId"], "canonical-test-v1")
+        self.assertEqual(body["metadata"]["statusCode"], 404)
 
 
 if __name__ == "__main__":

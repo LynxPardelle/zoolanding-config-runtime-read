@@ -24,6 +24,7 @@ from zoolanding_lambda_common import (
 
 CONFIG_TABLE_NAME = os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry")
 CONFIG_PAYLOADS_BUCKET_NAME = os.getenv("CONFIG_PAYLOADS_BUCKET_NAME", "zoolanding-config-payloads")
+CANONICAL_NOT_FOUND_DOMAIN = os.getenv("CANONICAL_NOT_FOUND_DOMAIN", "zoolandingpage.com.mx")
 
 
 def _is_record(value: Any) -> bool:
@@ -154,9 +155,58 @@ def _match_route(metadata: Dict[str, Any], path: str) -> Optional[Dict[str, Any]
     return None
 
 
+def _resolve_route(metadata: Dict[str, Any], site_config: Optional[Dict[str, Any]], path: str) -> Optional[Dict[str, Any]]:
+    return _match_route(metadata, path) or (_match_route(site_config, path) if isinstance(site_config, dict) else None)
+
+
+def _resolve_default_page_id(metadata: Dict[str, Any], site_config: Optional[Dict[str, Any]]) -> str:
+    configured = site_config.get("defaultPageId") if isinstance(site_config, dict) else None
+    return str(configured or metadata.get("defaultPageId") or "default").strip() or "default"
+
+
+def _resolve_not_found_page_id(metadata: Dict[str, Any], site_config: Optional[Dict[str, Any]]) -> str:
+    for source in (site_config, metadata):
+        if not isinstance(source, dict):
+            continue
+        configured = str(source.get("notFoundPageId") or "").strip()
+        if configured:
+            return configured
+
+    route = _resolve_route(metadata, site_config, "/404")
+    return str((route or {}).get("pageId") or "").strip()
+
+
 def _load_payload(bucket: str, prefix: str, relative_path: str) -> Optional[Dict[str, Any]]:
     key = join_s3_key(prefix, relative_path)
     return load_json_from_s3(bucket, key)
+
+
+def _load_runtime_payloads(domain: str, prefix: str, page_id: str, lang: str, site_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    page_config = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/page-config.json")
+    shared_components = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/components.json")
+    page_components = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/components.json")
+    shared_variables = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/variables.json")
+    page_variables = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/variables.json")
+    shared_angora_combos = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/angora-combos.json")
+    page_angora_combos = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/angora-combos.json")
+    shared_i18n = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/i18n/{lang}.json")
+    page_i18n = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/i18n/{lang}.json")
+
+    if not site_config or not page_config or not page_components:
+        return None
+
+    return {
+        "siteConfig": site_config,
+        "pageConfig": page_config,
+        "sharedComponents": shared_components,
+        "pageComponents": page_components,
+        "sharedVariables": shared_variables,
+        "pageVariables": page_variables,
+        "sharedAngoraCombos": shared_angora_combos,
+        "pageAngoraCombos": page_angora_combos,
+        "sharedI18n": shared_i18n,
+        "pageI18n": page_i18n,
+    }
 
 
 def _merge_components(
@@ -388,6 +438,110 @@ def _fallback_bundle(domain: str, page_id: str, metadata: Dict[str, Any], lifecy
     }
 
 
+def _published_bundle(
+    *,
+    request_id: str,
+    requested_domain: str,
+    domain: str,
+    resolved_alias: Optional[str],
+    environment: str,
+    version_id: str,
+    prefix: str,
+    path: str,
+    lang: str,
+    lifecycle: Dict[str, Any],
+    route: Optional[Dict[str, Any]],
+    page_id: str,
+    payloads: Dict[str, Any],
+    not_found_status: bool = False,
+    fallback_from_domain: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "domain": domain,
+        "pageId": page_id,
+        "sourceStage": "published",
+        "environment": environment,
+        "versionId": version_id,
+        "lang": lang,
+        "generatedAt": now_iso(),
+        "route": route,
+        "lifecycle": lifecycle,
+        "siteConfig": payloads["siteConfig"],
+        "pageConfig": payloads["pageConfig"],
+        "components": _merge_components(domain, page_id, payloads["sharedComponents"], payloads["pageComponents"]),
+        "variables": _merge_variables(domain, page_id, payloads["sharedVariables"], payloads["pageVariables"]),
+        "angoraCombos": _merge_angora_combos(domain, page_id, payloads["sharedAngoraCombos"], payloads["pageAngoraCombos"]),
+        "i18n": _merge_i18n(domain, page_id, lang, payloads["sharedI18n"], payloads["pageI18n"]),
+        "metadata": {
+            "requestId": request_id,
+            "requestedDomain": requested_domain,
+            "resolvedAlias": resolved_alias,
+            "environment": environment,
+            "resolvedPath": path,
+            "bucket": CONFIG_PAYLOADS_BUCKET_NAME,
+            "prefix": prefix,
+            "statusCode": 404 if not_found_status else 200,
+            "notFound": not_found_status,
+            "fallbackFromDomain": fallback_from_domain,
+        },
+    }
+
+
+def _canonical_not_found_response(
+    *,
+    request_id: str,
+    requested_domain: str,
+    path: str,
+    lang: str,
+    environment: str,
+    fallback_from_domain: Optional[str],
+) -> Dict[str, Any]:
+    domain = CANONICAL_NOT_FOUND_DOMAIN
+    metadata = load_item(CONFIG_TABLE_NAME, site_pk(domain))
+    if not isinstance(metadata, dict):
+        return not_found("Canonical 404 metadata not found", domain=domain, requestedDomain=requested_domain)
+
+    lifecycle = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {"status": "active"}
+    published_pointer = _published_pointer(metadata, environment)
+    effective_environment = environment
+    if not published_pointer and environment != "production":
+        published_pointer = _published_pointer(metadata, "production")
+        effective_environment = "production"
+    if not published_pointer:
+        return not_found("Canonical 404 published configuration not found", domain=domain, environment=environment)
+
+    version_id = str(published_pointer.get("versionId") or "").strip()
+    prefix = str(published_pointer.get("prefix") or default_version_prefix(domain, version_id)).strip()
+    if not prefix:
+        return not_found("Canonical 404 published configuration prefix is missing", domain=domain)
+
+    site_config = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/site-config.json")
+    page_id = _resolve_not_found_page_id(metadata, site_config) or "not-found"
+    route = _resolve_route(metadata, site_config, "/404")
+    payloads = _load_runtime_payloads(domain, prefix, page_id, lang, site_config)
+    if not payloads:
+        return not_found("Canonical 404 payload set is incomplete", domain=domain, pageId=page_id, versionId=version_id)
+
+    return ok(_published_bundle(
+        request_id=request_id,
+        requested_domain=requested_domain,
+        domain=domain,
+        resolved_alias=None,
+        environment=effective_environment,
+        version_id=version_id,
+        prefix=prefix,
+        path=path,
+        lang=lang,
+        lifecycle=lifecycle,
+        route=route,
+        page_id=page_id,
+        payloads=payloads,
+        not_found_status=True,
+        fallback_from_domain=fallback_from_domain,
+    ))
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     request_id = get_request_id(context)
     requested_domain = _resolve_domain(event)
@@ -400,20 +554,34 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
         domain, metadata, resolved_alias, environment = _resolve_site_metadata(requested_domain)
         if not metadata:
-            return not_found("Site metadata not found", domain=requested_domain)
+            return _canonical_not_found_response(
+                request_id=request_id,
+                requested_domain=requested_domain,
+                path=path,
+                lang=lang,
+                environment=environment,
+                fallback_from_domain=requested_domain,
+            )
 
         lifecycle = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {"status": "active"}
-        route = _match_route(metadata, path)
-        page_id = str((route or {}).get("pageId") or metadata.get("defaultPageId") or "default").strip() or "default"
 
         if str(lifecycle.get("status") or "active") != "active":
+            route = _match_route(metadata, path)
+            page_id = str((route or {}).get("pageId") or metadata.get("defaultPageId") or "default").strip() or "default"
             bundle = _fallback_bundle(domain, page_id, metadata, lifecycle)
             bundle["environment"] = environment
             return ok(bundle)
 
         published_pointer = _published_pointer(metadata, environment)
         if not published_pointer:
-            return not_found("Published configuration not found", domain=domain, environment=environment)
+            return _canonical_not_found_response(
+                request_id=request_id,
+                requested_domain=requested_domain,
+                path=path,
+                lang=lang,
+                environment=environment,
+                fallback_from_domain=domain,
+            )
 
         version_id = str(published_pointer.get("versionId") or "").strip()
         prefix = str(published_pointer.get("prefix") or default_version_prefix(domain, version_id)).strip()
@@ -421,17 +589,49 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return not_found("Published configuration prefix is missing", domain=domain)
 
         site_config = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/site-config.json")
-        page_config = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/page-config.json")
-        shared_components = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/components.json")
-        page_components = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/components.json")
-        shared_variables = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/variables.json")
-        page_variables = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/variables.json")
-        shared_angora_combos = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/angora-combos.json")
-        page_angora_combos = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/angora-combos.json")
-        shared_i18n = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/i18n/{lang}.json")
-        page_i18n = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/{page_id}/i18n/{lang}.json")
+        if not site_config:
+            return _canonical_not_found_response(
+                request_id=request_id,
+                requested_domain=requested_domain,
+                path=path,
+                lang=lang,
+                environment=environment,
+                fallback_from_domain=domain,
+            )
 
-        if not site_config or not page_config or not page_components:
+        route = _resolve_route(metadata, site_config, path)
+        should_render_not_found = False
+        if route:
+            page_id = str(route.get("pageId") or _resolve_default_page_id(metadata, site_config)).strip() or "default"
+        elif path == "/":
+            page_id = _resolve_default_page_id(metadata, site_config)
+        else:
+            page_id = _resolve_not_found_page_id(metadata, site_config)
+            should_render_not_found = True
+            route = _resolve_route(metadata, site_config, "/404")
+
+        if should_render_not_found and not page_id:
+            return _canonical_not_found_response(
+                request_id=request_id,
+                requested_domain=requested_domain,
+                path=path,
+                lang=lang,
+                environment=environment,
+                fallback_from_domain=domain,
+            )
+
+        payloads = _load_runtime_payloads(domain, prefix, page_id, lang, site_config)
+        if not payloads and should_render_not_found:
+            return _canonical_not_found_response(
+                request_id=request_id,
+                requested_domain=requested_domain,
+                path=path,
+                lang=lang,
+                environment=environment,
+                fallback_from_domain=domain,
+            )
+
+        if not payloads:
             return not_found(
                 "Published payload set is incomplete",
                 domain=domain,
@@ -439,35 +639,22 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 versionId=version_id,
             )
 
-        bundle = {
-            "version": 1,
-            "domain": domain,
-            "pageId": page_id,
-            "sourceStage": "published",
-            "environment": environment,
-            "versionId": version_id,
-            "lang": lang,
-            "generatedAt": now_iso(),
-            "route": route,
-            "lifecycle": lifecycle,
-            "siteConfig": site_config,
-            "pageConfig": page_config,
-            "components": _merge_components(domain, page_id, shared_components, page_components),
-            "variables": _merge_variables(domain, page_id, shared_variables, page_variables),
-            "angoraCombos": _merge_angora_combos(domain, page_id, shared_angora_combos, page_angora_combos),
-            "i18n": _merge_i18n(domain, page_id, lang, shared_i18n, page_i18n),
-            "metadata": {
-                "requestId": request_id,
-                "requestedDomain": requested_domain,
-                "resolvedAlias": resolved_alias,
-                "environment": environment,
-                "resolvedPath": path,
-                "bucket": CONFIG_PAYLOADS_BUCKET_NAME,
-                "prefix": prefix,
-            },
-        }
-
-        return ok(bundle)
+        return ok(_published_bundle(
+            request_id=request_id,
+            requested_domain=requested_domain,
+            domain=domain,
+            resolved_alias=resolved_alias,
+            environment=environment,
+            version_id=version_id,
+            prefix=prefix,
+            path=path,
+            lang=lang,
+            lifecycle=lifecycle,
+            route=route,
+            page_id=page_id,
+            payloads=payloads,
+            not_found_status=should_render_not_found,
+        ))
     except Exception as exc:
         log("ERROR", "Runtime bundle read failed", requestId=request_id, domain=requested_domain, path=path, error=str(exc))
         return server_error()
