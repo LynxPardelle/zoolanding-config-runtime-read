@@ -76,32 +76,73 @@ def _normalize_aliases(value: Any) -> list[str]:
     return normalized
 
 
-def _resolve_site_metadata(domain: str) -> tuple[str, Optional[Dict[str, Any]], Optional[str]]:
+def _normalize_environment(value: Any) -> str:
+    environment = str(value or "production").strip().lower()
+    if environment in {"prod", "live", "main"}:
+        return "production"
+    if environment in {"testing", "stage", "staging"}:
+        return "test"
+    if environment in {"production", "test"}:
+        return environment
+    return "production"
+
+
+def _normalize_environment_aliases(value: Any) -> Dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: Dict[str, list[str]] = {}
+    for environment, aliases in value.items():
+        normalized_environment = _normalize_environment(environment)
+        normalized_aliases = _normalize_aliases(aliases)
+        if normalized_aliases:
+            normalized[normalized_environment] = normalized_aliases
+    return normalized
+
+
+def _resolve_site_metadata(domain: str) -> tuple[str, Optional[Dict[str, Any]], Optional[str], str]:
     canonical_domain = normalize_domain(domain)
     if not canonical_domain:
-        return "", None, None
+        return "", None, None, "production"
 
     metadata = load_item(CONFIG_TABLE_NAME, site_pk(canonical_domain))
     if isinstance(metadata, dict):
-        return canonical_domain, metadata, None
+        return canonical_domain, metadata, None, "production"
 
     alias_item = load_item(CONFIG_TABLE_NAME, alias_pk(canonical_domain), "SITE")
     if not isinstance(alias_item, dict):
-        return canonical_domain, None, None
+        return canonical_domain, None, None, "production"
 
     target_domain = normalize_domain(alias_item.get("domain"))
     if not target_domain:
-        return canonical_domain, None, None
+        return canonical_domain, None, None, "production"
 
     metadata = load_item(CONFIG_TABLE_NAME, site_pk(target_domain))
     if not isinstance(metadata, dict):
-        return canonical_domain, None, None
+        return canonical_domain, None, None, "production"
 
-    aliases = _normalize_aliases(metadata.get("aliases"))
+    environment = _normalize_environment(alias_item.get("environment"))
+    if environment == "production":
+        aliases = _normalize_aliases(metadata.get("aliases"))
+    else:
+        aliases = _normalize_environment_aliases(metadata.get("environmentAliases")).get(environment, [])
     if canonical_domain not in aliases:
-        return canonical_domain, None, None
+        return canonical_domain, None, None, "production"
 
-    return target_domain, metadata, canonical_domain
+    return target_domain, metadata, canonical_domain, environment
+
+
+def _published_pointer(metadata: Dict[str, Any], environment: str) -> Optional[Dict[str, Any]]:
+    published_environments = metadata.get("publishedEnvironments") if isinstance(metadata.get("publishedEnvironments"), dict) else {}
+    if environment != "production":
+        pointer = published_environments.get(environment)
+        return pointer if isinstance(pointer, dict) else None
+
+    legacy_pointer = metadata.get("published") if isinstance(metadata.get("published"), dict) else None
+    if legacy_pointer:
+        return legacy_pointer
+    pointer = published_environments.get("production")
+    return pointer if isinstance(pointer, dict) else None
 
 
 def _match_route(metadata: Dict[str, Any], path: str) -> Optional[Dict[str, Any]]:
@@ -357,7 +398,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return bad_request("Missing domain. Provide query parameter 'domain' or a host header.")
 
     try:
-        domain, metadata, resolved_alias = _resolve_site_metadata(requested_domain)
+        domain, metadata, resolved_alias, environment = _resolve_site_metadata(requested_domain)
         if not metadata:
             return not_found("Site metadata not found", domain=requested_domain)
 
@@ -367,11 +408,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         if str(lifecycle.get("status") or "active") != "active":
             bundle = _fallback_bundle(domain, page_id, metadata, lifecycle)
+            bundle["environment"] = environment
             return ok(bundle)
 
-        published_pointer = metadata.get("published") if isinstance(metadata.get("published"), dict) else None
+        published_pointer = _published_pointer(metadata, environment)
         if not published_pointer:
-            return not_found("Published configuration not found", domain=domain)
+            return not_found("Published configuration not found", domain=domain, environment=environment)
 
         version_id = str(published_pointer.get("versionId") or "").strip()
         prefix = str(published_pointer.get("prefix") or default_version_prefix(domain, version_id)).strip()
@@ -402,6 +444,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "domain": domain,
             "pageId": page_id,
             "sourceStage": "published",
+            "environment": environment,
             "versionId": version_id,
             "lang": lang,
             "generatedAt": now_iso(),
@@ -417,6 +460,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "requestId": request_id,
                 "requestedDomain": requested_domain,
                 "resolvedAlias": resolved_alias,
+                "environment": environment,
                 "resolvedPath": path,
                 "bucket": CONFIG_PAYLOADS_BUCKET_NAME,
                 "prefix": prefix,

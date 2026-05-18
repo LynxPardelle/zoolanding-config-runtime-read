@@ -5,7 +5,7 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 ## Responsibilities
 
 - Read site metadata from DynamoDB.
-- Resolve alias domains back to the canonical site when `site-config.json.aliases` declares preview or alternate hosts.
+- Resolve alias domains back to the canonical site and environment when `site-config.json.aliases` or `site-config.json.environments.*.aliases` declares alternate hosts.
 - Resolve the current page by host and route.
 - Load the published payload set from S3.
 - Merge shared and page components.
@@ -68,7 +68,10 @@ The DynamoDB item for each site should look like this:
   "type": "site-metadata",
   "version": 1,
   "domain": "zoolandingpage.com.mx",
-  "aliases": ["test.zoolandingpage.com.mx"],
+  "aliases": ["zoolandingpage.com.mx"],
+  "environmentAliases": {
+    "test": ["test.zoolandingpage.com.mx"]
+  },
   "defaultPageId": "default",
   "routes": [{ "path": "/", "pageId": "default" }],
   "lifecycle": {
@@ -82,6 +85,16 @@ The DynamoDB item for each site should look like this:
     "prefix": "sites/zoolandingpage.com.mx/versions/20260331T000000Z-localabcd1234",
     "updatedAt": "2026-03-31T00:00:00Z",
     "updatedBy": "system"
+  },
+  "publishedEnvironments": {
+    "production": {
+      "versionId": "20260331T000000Z-localabcd1234",
+      "prefix": "sites/zoolandingpage.com.mx/versions/20260331T000000Z-localabcd1234"
+    },
+    "test": {
+      "versionId": "20260331T010000Z-testabcd1234",
+      "prefix": "sites/zoolandingpage.com.mx/versions/20260331T010000Z-testabcd1234"
+    }
   }
 }
 ```
@@ -94,9 +107,12 @@ Each alias also gets a lightweight lookup item:
   "sk": "SITE",
   "type": "site-alias",
   "alias": "test.zoolandingpage.com.mx",
-  "domain": "zoolandingpage.com.mx"
+  "domain": "zoolandingpage.com.mx",
+  "environment": "test"
 }
 ```
+
+If `environment` is missing on an alias item, runtime-read treats it as `production` for backward compatibility. Production uses the legacy `published` pointer first and falls back to `publishedEnvironments.production`. Test aliases require `publishedEnvironments.test`.
 
 The S3 payload prefix must contain:
 
