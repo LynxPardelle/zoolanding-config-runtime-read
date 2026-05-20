@@ -23,12 +23,20 @@ Globals:
     Timeout: 10
     MemorySize: 256
     Tracing: PassThrough
+    Tags:
+      Project: Zoolandingpage
+      Component: RuntimeFrontDoor
+      ManagedBy: SAM
 
 Resources:
   RuntimeApi:
     Type: AWS::Serverless::Api
     Properties:
       StageName: Prod
+      Tags:
+        Project: Zoolandingpage
+        Component: RuntimeFrontDoor
+        ManagedBy: SAM
       Cors:
         AllowOrigin: "'*'"
         AllowHeaders: "'Content-Type,Authorization'"
@@ -40,6 +48,7 @@ Resources:
       CodeUri: .
       Handler: lambda_function.lambda_handler
       Description: Resolves the current site by domain and route and returns one effective runtime bundle.
+      ReservedConcurrentExecutions: 100
       Environment:
         Variables:
           CONFIG_TABLE_NAME:

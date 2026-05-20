@@ -18,6 +18,7 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 - S3 bucket: `zoolanding-config-payloads`
 - API Gateway: `GET /runtime-bundle`
 - CloudWatch Logs
+- Lambda reserved concurrency: `100`
 
 ## Environment variables
 
@@ -34,6 +35,8 @@ sam deploy
 ```
 
 The checked-in `samconfig.toml` already targets `us-east-1` with the correct stack name and parameter overrides.
+
+The SAM template owns the runtime-read reserved concurrency guard. Keep `ReservedConcurrentExecutions` at `100` unless a new load test and cost review justify changing it. Use the hub repo script `tools/ops/configure-runtime-observability.mjs` to manage the matching CloudWatch alarms, SNS alert topic, tags, and notification-only budget.
 
 The first non-interactive deployment command used was:
 
