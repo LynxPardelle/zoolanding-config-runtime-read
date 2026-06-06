@@ -11,10 +11,12 @@ def parse(response):
     return json.loads(response["body"])
 
 
-def event(host, path="/", lang="es"):
+def event(host, path="/", lang="es", **query):
+    query_params = {"path": path, "lang": lang}
+    query_params.update({key: value for key, value in query.items() if value is not None})
     return {
         "headers": {"host": host},
-        "queryStringParameters": {"path": path, "lang": lang},
+        "queryStringParameters": query_params,
         "requestContext": {"http": {"path": path}},
     }
 
@@ -151,6 +153,21 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["versionId"], "prod-v1")
         self.assertEqual(body["pageId"], "default")
         self.assertTrue(any(key.startswith("prod-prefix/") for key in self.loaded_keys))
+
+    def test_canonical_domain_environment_query_uses_test_pointer(self):
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["domain"], "pamelabetancourt.com")
+        self.assertEqual(body["environment"], "test")
+        self.assertEqual(body["versionId"], "test-v1")
+        self.assertEqual(body["metadata"]["requestedDomain"], "pamelabetancourt.com")
+        self.assertIsNone(body["metadata"]["resolvedAlias"])
+        self.assertTrue(any(key.startswith("test-prefix/") for key in self.loaded_keys))
 
     def test_unknown_route_uses_configured_not_found_page_id(self):
         response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())

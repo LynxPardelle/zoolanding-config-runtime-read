@@ -88,6 +88,15 @@ def _normalize_environment(value: Any) -> str:
     return "production"
 
 
+def _requested_environment_override(event: Dict[str, Any]) -> Optional[str]:
+    raw_environment = str(get_query_value(event, "environment") or "").strip().lower()
+    if not raw_environment:
+        return None
+    if raw_environment not in {"production", "prod", "live", "main", "test", "testing", "stage", "staging"}:
+        return None
+    return _normalize_environment(raw_environment)
+
+
 def _infer_environment_from_domain(domain: str) -> str:
     normalized = normalize_domain(domain)
     return "test" if normalized.startswith("test.") else "production"
@@ -550,6 +559,7 @@ def _canonical_not_found_response(
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     request_id = get_request_id(context)
     requested_domain = _resolve_domain(event)
+    requested_environment = _requested_environment_override(event)
     path = _resolve_path(event)
     lang = get_query_value(event, "lang") or "en"
 
@@ -558,13 +568,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     try:
         domain, metadata, resolved_alias, environment = _resolve_site_metadata(requested_domain)
+        if requested_environment and not resolved_alias:
+            environment = requested_environment
+
         if not metadata:
             return _canonical_not_found_response(
                 request_id=request_id,
                 requested_domain=requested_domain,
                 path=path,
                 lang=lang,
-                environment=_infer_environment_from_domain(requested_domain),
+                environment=requested_environment or _infer_environment_from_domain(requested_domain),
                 fallback_from_domain=requested_domain,
             )
 
