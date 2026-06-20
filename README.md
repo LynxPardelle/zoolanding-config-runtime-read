@@ -11,6 +11,7 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 - Merge shared and page components.
 - Merge shared and page variables, angora combos, and i18n dictionaries.
 - Return a professional fallback bundle when the site is in `maintenance` or `suspended` state.
+- Return safe public content hub metadata for blog/article-style features.
 
 ## AWS dependencies
 
@@ -24,6 +25,7 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 
 - `CONFIG_TABLE_NAME`
 - `CONFIG_PAYLOADS_BUCKET_NAME`
+- `ENVIRONMENT_NAME`
 - `LOG_LEVEL`
 
 ## Deploy
@@ -34,7 +36,11 @@ For repeatable deployments from this repository:
 sam deploy
 ```
 
-The checked-in `samconfig.toml` already targets `us-east-1` with the correct stack name and parameter overrides.
+The checked-in `samconfig.toml` includes `dev`, `test`, and `prod` deployment profiles in `us-east-1`.
+
+- `dev` uses `zoolanding-config-registry-dev` and `zoolanding-config-payloads-dev`.
+- `test` uses `zoolanding-config-registry-test` and `zoolanding-config-payloads-test`.
+- `prod` uses the existing production table and bucket names.
 
 The SAM template owns the runtime-read reserved concurrency guard. Keep `ReservedConcurrentExecutions` at `100` unless a new load test and cost review justify changing it. Use the hub repo script `tools/ops/configure-runtime-observability.mjs` to manage the matching CloudWatch alarms, SNS alert topic, tags, and notification-only budget.
 
@@ -59,6 +65,12 @@ curl "https://your-api-id.execute-api.us-east-1.amazonaws.com/Prod/runtime-bundl
 ```
 
 The request also works without the `domain` query string when the API receives a `Host` or `X-Forwarded-Host` header that matches a configured site or an authored alias.
+
+Runtime requests can use `environment=dev` or `environment=test` on canonical-domain reads when the frontend/API proxy is configured to request non-production bundles.
+
+## Content hub runtime metadata
+
+When `site-config.json` includes `contentHubs`, the runtime bundle includes a safe projection under `metadata.contentHubs`. The projection is allowlisted to `hubId`, `name`, `defaultLanguage`, `canonicalDraftDomain`, `allowedDraftDomains`, and `articleIds`; arbitrary nested authoring fields are not exposed.
 
 ## Required data shape
 

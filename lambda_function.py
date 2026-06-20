@@ -81,9 +81,11 @@ def _normalize_environment(value: Any) -> str:
     environment = str(value or "production").strip().lower()
     if environment in {"prod", "live", "main"}:
         return "production"
+    if environment in {"development", "local"}:
+        return "dev"
     if environment in {"testing", "stage", "staging"}:
         return "test"
-    if environment in {"production", "test"}:
+    if environment in {"production", "test", "dev"}:
         return environment
     return "production"
 
@@ -92,7 +94,7 @@ def _requested_environment_override(event: Dict[str, Any]) -> Optional[str]:
     raw_environment = str(get_query_value(event, "environment") or "").strip().lower()
     if not raw_environment:
         return None
-    if raw_environment not in {"production", "prod", "live", "main", "test", "testing", "stage", "staging"}:
+    if raw_environment not in {"production", "prod", "live", "main", "test", "testing", "stage", "staging", "dev", "development", "local"}:
         return None
     return _normalize_environment(raw_environment)
 
@@ -158,6 +160,34 @@ def _published_pointer(metadata: Dict[str, Any], environment: str) -> Optional[D
         return legacy_pointer
     pointer = published_environments.get("production")
     return pointer if isinstance(pointer, dict) else None
+
+
+def _public_content_hubs(metadata: Dict[str, Any]) -> list[Dict[str, Any]]:
+    raw_hubs = metadata.get("contentHubs")
+    if not isinstance(raw_hubs, list):
+        return []
+
+    public_hubs: list[Dict[str, Any]] = []
+    for raw_hub in raw_hubs:
+        if not isinstance(raw_hub, dict):
+            continue
+        hub_id = str(raw_hub.get("hubId") or "").strip()
+        if not hub_id:
+            continue
+        public_hub: Dict[str, Any] = {
+            "hubId": hub_id,
+            "name": str(raw_hub.get("name") or hub_id).strip() or hub_id,
+            "defaultLanguage": str(raw_hub.get("defaultLanguage") or "es").strip() or "es",
+            "canonicalDraftDomain": normalize_domain(raw_hub.get("canonicalDraftDomain") or metadata.get("domain") or ""),
+        }
+        article_ids = raw_hub.get("articleIds")
+        if isinstance(article_ids, list):
+            public_hub["articleIds"] = [str(item).strip() for item in article_ids if str(item).strip()]
+        allowed_domains = raw_hub.get("allowedDraftDomains")
+        if isinstance(allowed_domains, list):
+            public_hub["allowedDraftDomains"] = [normalize_domain(item) for item in allowed_domains if normalize_domain(item)]
+        public_hubs.append(public_hub)
+    return public_hubs
 
 
 def _match_route(metadata: Dict[str, Any], path: str) -> Optional[Dict[str, Any]]:
@@ -464,6 +494,7 @@ def _published_bundle(
     path: str,
     lang: str,
     lifecycle: Dict[str, Any],
+    site_metadata: Dict[str, Any],
     route: Optional[Dict[str, Any]],
     page_id: str,
     payloads: Dict[str, Any],
@@ -498,6 +529,7 @@ def _published_bundle(
             "statusCode": 404 if not_found_status else 200,
             "notFound": not_found_status,
             "fallbackFromDomain": fallback_from_domain,
+            "contentHubs": _public_content_hubs(site_metadata) or _public_content_hubs({"domain": domain, **payloads.get("siteConfig", {})}),
         },
     }
 
@@ -548,6 +580,7 @@ def _canonical_not_found_response(
         path=path,
         lang=lang,
         lifecycle=lifecycle,
+        site_metadata=metadata,
         route=route,
         page_id=page_id,
         payloads=payloads,
@@ -668,6 +701,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             path=path,
             lang=lang,
             lifecycle=lifecycle,
+            site_metadata=metadata,
             route=route,
             page_id=page_id,
             payloads=payloads,
