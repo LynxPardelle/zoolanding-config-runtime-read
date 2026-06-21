@@ -227,8 +227,11 @@ class RuntimeHandlerTest(unittest.TestCase):
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
+        self.assertNotIn("bucket", body["metadata"])
+        self.assertNotIn("prefix", body["metadata"])
         self.assertEqual(body["metadata"]["contentHubs"][0]["hubId"], "main")
-        self.assertEqual(body["metadata"]["contentHubs"][0]["articleIds"], ["primer-post"])
+        self.assertNotIn("articleIds", body["metadata"]["contentHubs"][0])
+        self.assertNotIn("allowedDraftDomains", body["metadata"]["contentHubs"][0])
         self.assertNotIn("serverOnly", body["metadata"]["contentHubs"][0])
 
     def test_unknown_route_uses_configured_not_found_page_id(self):

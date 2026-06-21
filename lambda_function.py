@@ -180,12 +180,6 @@ def _public_content_hubs(metadata: Dict[str, Any]) -> list[Dict[str, Any]]:
             "defaultLanguage": str(raw_hub.get("defaultLanguage") or "es").strip() or "es",
             "canonicalDraftDomain": normalize_domain(raw_hub.get("canonicalDraftDomain") or metadata.get("domain") or ""),
         }
-        article_ids = raw_hub.get("articleIds")
-        if isinstance(article_ids, list):
-            public_hub["articleIds"] = [str(item).strip() for item in article_ids if str(item).strip()]
-        allowed_domains = raw_hub.get("allowedDraftDomains")
-        if isinstance(allowed_domains, list):
-            public_hub["allowedDraftDomains"] = [normalize_domain(item) for item in allowed_domains if normalize_domain(item)]
         public_hubs.append(public_hub)
     return public_hubs
 
@@ -541,8 +535,6 @@ def _published_bundle(
             "resolvedAlias": resolved_alias,
             "environment": environment,
             "resolvedPath": path,
-            "bucket": CONFIG_PAYLOADS_BUCKET_NAME,
-            "prefix": prefix,
             "statusCode": 404 if not_found_status else 200,
             "notFound": not_found_status,
             "fallbackFromDomain": fallback_from_domain,
