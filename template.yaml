@@ -3,6 +3,11 @@ Transform: AWS::Serverless-2016-10-31
 Description: Zoolanding Config Runtime Read Lambda - SAM Template
 
 Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, test, prod, production]
+    Description: Deployment environment name used for tags and environment-specific stack configuration.
   ConfigTableName:
     Type: String
     Default: zoolanding-config-registry
@@ -27,6 +32,8 @@ Globals:
       Project: Zoolandingpage
       Component: RuntimeFrontDoor
       ManagedBy: SAM
+      Environment:
+        Ref: EnvironmentName
 
 Resources:
   RuntimeApi:
@@ -37,6 +44,8 @@ Resources:
         Project: Zoolandingpage
         Component: RuntimeFrontDoor
         ManagedBy: SAM
+        Environment:
+          Ref: EnvironmentName
       Cors:
         AllowOrigin: "'*'"
         AllowHeaders: "'Content-Type,Authorization'"
@@ -55,6 +64,8 @@ Resources:
             Ref: ConfigTableName
           CONFIG_PAYLOADS_BUCKET_NAME:
             Ref: ConfigPayloadsBucketName
+          ENVIRONMENT_NAME:
+            Ref: EnvironmentName
           LOG_LEVEL:
             Ref: LogLevel
       Policies:
