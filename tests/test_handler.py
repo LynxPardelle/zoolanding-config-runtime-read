@@ -34,11 +34,23 @@ class RuntimeHandlerTest(unittest.TestCase):
             },
             "defaultPageId": "default",
             "routes": [{"path": "/", "pageId": "default"}],
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "name": "Blog",
+                    "defaultLanguage": "es",
+                    "canonicalDraftDomain": "pamelabetancourt.com",
+                    "allowedDraftDomains": ["pamelabetancourt.com", "sulandingpage.com.mx"],
+                    "articleIds": ["primer-post"],
+                    "serverOnly": {"token": "must-not-render"},
+                }
+            ],
             "lifecycle": {"status": "active"},
             "published": {"versionId": "prod-v1", "prefix": "prod-prefix"},
             "publishedEnvironments": {
                 "production": {"versionId": "prod-v1", "prefix": "prod-prefix"},
                 "test": {"versionId": "test-v1", "prefix": "test-prefix"},
+                "dev": {"versionId": "dev-v1", "prefix": "dev-prefix"},
             },
         }
         self.canonical_metadata = {
@@ -79,7 +91,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.payloads = {}
         self.loaded_keys = []
 
-        for prefix in ("prod-prefix", "test-prefix"):
+        for prefix in ("prod-prefix", "test-prefix", "dev-prefix"):
             self.put_site(prefix, "pamelabetancourt.com", include_not_found=True)
             self.put_page(prefix, "pamelabetancourt.com", "default", "Hero")
             self.put_page(prefix, "pamelabetancourt.com", "not-found", "Page not found")
@@ -108,6 +120,17 @@ class RuntimeHandlerTest(unittest.TestCase):
             "domain": domain,
             "defaultPageId": "default",
             "routes": routes,
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "name": "Blog",
+                    "defaultLanguage": "es",
+                    "canonicalDraftDomain": domain,
+                    "allowedDraftDomains": [domain, "sulandingpage.com.mx"],
+                    "serverOnly": {"token": "must-not-render"},
+                    "articleIds": ["primer-post"],
+                }
+            ],
         }
         if include_not_found:
             payload["notFoundPageId"] = "not-found"
@@ -168,6 +191,48 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["metadata"]["requestedDomain"], "pamelabetancourt.com")
         self.assertIsNone(body["metadata"]["resolvedAlias"])
         self.assertTrue(any(key.startswith("test-prefix/") for key in self.loaded_keys))
+
+    def test_canonical_domain_environment_query_uses_dev_pointer(self):
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", domain="pamelabetancourt.com", environment="dev"),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["environment"], "dev")
+        self.assertEqual(body["versionId"], "dev-v1")
+        self.assertTrue(any(key.startswith("dev-prefix/") for key in self.loaded_keys))
+
+    def test_parameterized_category_route_resolves_page_payload(self):
+        self.metadata["routes"].append({"path": "/blog/:categorySlug", "pageId": "blog-category"})
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-category", "Category page")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["routes"].append({"path": "/blog/:categorySlug", "pageId": "blog-category"})
+
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/web", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["environment"], "test")
+        self.assertEqual(body["pageId"], "blog-category")
+        self.assertEqual(body["route"]["path"], "/blog/:categorySlug")
+        self.assertFalse(body["metadata"]["notFound"])
+
+    def test_runtime_bundle_exposes_public_content_hub_metadata(self):
+        response = self.handler.lambda_handler(event("pamelabetancourt.com"), Context())
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertNotIn("bucket", body["metadata"])
+        self.assertNotIn("prefix", body["metadata"])
+        self.assertEqual(body["metadata"]["contentHubs"][0]["hubId"], "main")
+        self.assertNotIn("articleIds", body["metadata"]["contentHubs"][0])
+        self.assertNotIn("allowedDraftDomains", body["metadata"]["contentHubs"][0])
+        self.assertNotIn("serverOnly", body["metadata"]["contentHubs"][0])
 
     def test_unknown_route_uses_configured_not_found_page_id(self):
         response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())

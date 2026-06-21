@@ -81,9 +81,11 @@ def _normalize_environment(value: Any) -> str:
     environment = str(value or "production").strip().lower()
     if environment in {"prod", "live", "main"}:
         return "production"
+    if environment in {"development", "local"}:
+        return "dev"
     if environment in {"testing", "stage", "staging"}:
         return "test"
-    if environment in {"production", "test"}:
+    if environment in {"production", "test", "dev"}:
         return environment
     return "production"
 
@@ -92,7 +94,7 @@ def _requested_environment_override(event: Dict[str, Any]) -> Optional[str]:
     raw_environment = str(get_query_value(event, "environment") or "").strip().lower()
     if not raw_environment:
         return None
-    if raw_environment not in {"production", "prod", "live", "main", "test", "testing", "stage", "staging"}:
+    if raw_environment not in {"production", "prod", "live", "main", "test", "testing", "stage", "staging", "dev", "development", "local"}:
         return None
     return _normalize_environment(raw_environment)
 
@@ -160,12 +162,51 @@ def _published_pointer(metadata: Dict[str, Any], environment: str) -> Optional[D
     return pointer if isinstance(pointer, dict) else None
 
 
+def _public_content_hubs(metadata: Dict[str, Any]) -> list[Dict[str, Any]]:
+    raw_hubs = metadata.get("contentHubs")
+    if not isinstance(raw_hubs, list):
+        return []
+
+    public_hubs: list[Dict[str, Any]] = []
+    for raw_hub in raw_hubs:
+        if not isinstance(raw_hub, dict):
+            continue
+        hub_id = str(raw_hub.get("hubId") or "").strip()
+        if not hub_id:
+            continue
+        public_hub: Dict[str, Any] = {
+            "hubId": hub_id,
+            "name": str(raw_hub.get("name") or hub_id).strip() or hub_id,
+            "defaultLanguage": str(raw_hub.get("defaultLanguage") or "es").strip() or "es",
+            "canonicalDraftDomain": normalize_domain(raw_hub.get("canonicalDraftDomain") or metadata.get("domain") or ""),
+        }
+        public_hubs.append(public_hub)
+    return public_hubs
+
+
 def _match_route(metadata: Dict[str, Any], path: str) -> Optional[Dict[str, Any]]:
+    normalized_path = normalize_route_path(path)
+    parameterized_match: Optional[Dict[str, Any]] = None
+
     for route in metadata.get("routes", []):
         if not isinstance(route, dict):
             continue
-        if normalize_route_path(route.get("path", "/")) == path:
+        route_path = normalize_route_path(route.get("path", "/"))
+        if route_path == normalized_path:
             return route
+
+        if parameterized_match is not None or ":" not in route_path:
+            continue
+
+        route_segments = [segment for segment in route_path.split("/") if segment]
+        path_segments = [segment for segment in normalized_path.split("/") if segment]
+        if len(route_segments) != len(path_segments):
+            continue
+        if all(route_segment.startswith(":") or route_segment == path_segment for route_segment, path_segment in zip(route_segments, path_segments)):
+            parameterized_match = route
+
+    if parameterized_match is not None:
+        return parameterized_match
     return None
 
 
@@ -464,6 +505,7 @@ def _published_bundle(
     path: str,
     lang: str,
     lifecycle: Dict[str, Any],
+    site_metadata: Dict[str, Any],
     route: Optional[Dict[str, Any]],
     page_id: str,
     payloads: Dict[str, Any],
@@ -493,11 +535,10 @@ def _published_bundle(
             "resolvedAlias": resolved_alias,
             "environment": environment,
             "resolvedPath": path,
-            "bucket": CONFIG_PAYLOADS_BUCKET_NAME,
-            "prefix": prefix,
             "statusCode": 404 if not_found_status else 200,
             "notFound": not_found_status,
             "fallbackFromDomain": fallback_from_domain,
+            "contentHubs": _public_content_hubs(site_metadata) or _public_content_hubs({"domain": domain, **payloads.get("siteConfig", {})}),
         },
     }
 
@@ -548,6 +589,7 @@ def _canonical_not_found_response(
         path=path,
         lang=lang,
         lifecycle=lifecycle,
+        site_metadata=metadata,
         route=route,
         page_id=page_id,
         payloads=payloads,
@@ -668,6 +710,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             path=path,
             lang=lang,
             lifecycle=lifecycle,
+            site_metadata=metadata,
             route=route,
             page_id=page_id,
             payloads=payloads,
