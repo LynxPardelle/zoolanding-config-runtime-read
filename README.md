@@ -7,6 +7,7 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 - Read site metadata from DynamoDB.
 - Resolve alias domains back to the canonical site and environment when `site-config.json.aliases` or `site-config.json.environments.*.aliases` declares alternate hosts.
 - Resolve the current page by host and route.
+- Resolve exact routes before parameterized route patterns such as `/blog/:categorySlug`.
 - Load the published payload set from S3.
 - Merge shared and page components.
 - Merge shared and page variables, angora combos, and i18n dictionaries.

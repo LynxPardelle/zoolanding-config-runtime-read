@@ -204,6 +204,24 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["versionId"], "dev-v1")
         self.assertTrue(any(key.startswith("dev-prefix/") for key in self.loaded_keys))
 
+    def test_parameterized_category_route_resolves_page_payload(self):
+        self.metadata["routes"].append({"path": "/blog/:categorySlug", "pageId": "blog-category"})
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-category", "Category page")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["routes"].append({"path": "/blog/:categorySlug", "pageId": "blog-category"})
+
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/web", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["environment"], "test")
+        self.assertEqual(body["pageId"], "blog-category")
+        self.assertEqual(body["route"]["path"], "/blog/:categorySlug")
+        self.assertFalse(body["metadata"]["notFound"])
+
     def test_runtime_bundle_exposes_public_content_hub_metadata(self):
         response = self.handler.lambda_handler(event("pamelabetancourt.com"), Context())
         body = parse(response)

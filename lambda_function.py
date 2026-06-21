@@ -191,11 +191,28 @@ def _public_content_hubs(metadata: Dict[str, Any]) -> list[Dict[str, Any]]:
 
 
 def _match_route(metadata: Dict[str, Any], path: str) -> Optional[Dict[str, Any]]:
+    normalized_path = normalize_route_path(path)
+    parameterized_match: Optional[Dict[str, Any]] = None
+
     for route in metadata.get("routes", []):
         if not isinstance(route, dict):
             continue
-        if normalize_route_path(route.get("path", "/")) == path:
+        route_path = normalize_route_path(route.get("path", "/"))
+        if route_path == normalized_path:
             return route
+
+        if parameterized_match is not None or ":" not in route_path:
+            continue
+
+        route_segments = [segment for segment in route_path.split("/") if segment]
+        path_segments = [segment for segment in normalized_path.split("/") if segment]
+        if len(route_segments) != len(path_segments):
+            continue
+        if all(route_segment.startswith(":") or route_segment == path_segment for route_segment, path_segment in zip(route_segments, path_segments)):
+            parameterized_match = route
+
+    if parameterized_match is not None:
+        return parameterized_match
     return None
 
 
