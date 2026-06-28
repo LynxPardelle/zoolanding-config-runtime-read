@@ -32,7 +32,23 @@ CONTENT_HUB_METADATA_TABLE_NAME = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME", "
 CONTENT_HUB_METADATA_TABLE_NAME_DEV = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_DEV", "").strip()
 CONTENT_HUB_METADATA_TABLE_NAME_TEST = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_TEST", "").strip()
 CONTENT_HUB_METADATA_TABLE_NAME_PROD = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_PROD", "").strip()
+CONTENT_HUB_PACKAGES_BUCKET_NAME = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME", "").strip()
+CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV", "").strip()
+CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST", "").strip()
+CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD", "").strip()
 SAFE_CONTENT_HUB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+CONTENT_HUB_SECRET_KEY_RE = re.compile(
+    r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|credential[_-]?ref|"
+    r"secret[_-]?ref|private[_-]?key|server[_-]?policy|table[_-]?name|bucket[_-]?name|"
+    r"lambda[_-]?arn|groups[_-]?to[_-]?roles|authorization[_-]?decision|signed[_-]?url|"
+    r"tenant[_-]?id|aws[_-]?secret|aws[_-]?access)",
+    re.I,
+)
+CONTENT_HUB_UNSAFE_VALUE_RE = re.compile(
+    r"(?:javascript:|data:|X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|"
+    r"AWSAccessKeyId=|Signature=|Expires=|ssm:/|secretsmanager:/)",
+    re.I,
+)
 
 
 def _is_record(value: Any) -> bool:
@@ -202,6 +218,20 @@ def _content_hub_table_name(environment: Optional[str] = None) -> str:
     return env_specific or os.getenv("CONTENT_HUB_METADATA_TABLE_NAME", CONTENT_HUB_METADATA_TABLE_NAME).strip()
 
 
+def _content_hub_packages_bucket_name(environment: Optional[str] = None) -> str:
+    normalized_environment = _normalize_environment(environment) if environment else ""
+    env_specific = {
+        "dev": os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV", CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV).strip(),
+        "test": os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST", CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST).strip(),
+        "production": os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD", CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD).strip(),
+    }.get(normalized_environment, "")
+    return env_specific or os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME", CONTENT_HUB_PACKAGES_BUCKET_NAME).strip()
+
+
+def _content_hub_environment_segment(environment: str) -> str:
+    return "prod" if _normalize_environment(environment) == "production" else _normalize_environment(environment)
+
+
 def _safe_content_hub_id(value: Any) -> str:
     text = str(value or "").strip()
     return text if SAFE_CONTENT_HUB_ID_RE.fullmatch(text) else ""
@@ -217,11 +247,62 @@ def _safe_content_hub_path(value: Any) -> str:
     return path
 
 
+def _safe_content_hub_bundle_key(
+    value: Any,
+    *,
+    environment: str,
+    hub_id: str,
+    render_domain: str,
+    locale: str,
+    article_id: str,
+) -> str:
+    key = str(value or "").strip()
+    if not key or "\\" in key or re.search(r"[\s\x00-\x1f\x7f]", key):
+        return ""
+    parts = [part for part in key.split("/") if part]
+    if len(parts) != 9 or ".." in parts:
+        return ""
+    expected = [
+        "content-hubs",
+        _content_hub_environment_segment(environment),
+        hub_id,
+        "published",
+        render_domain,
+        locale,
+        article_id,
+    ]
+    if parts[:7] != expected or not _safe_content_hub_id(parts[7]) or parts[8] != "bundle.json":
+        return ""
+    return "/".join(parts)
+
+
 def _safe_content_hub_text(value: Any, max_length: int) -> str:
     text = str(value or "").strip()
     if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
         return ""
     return text[:max_length]
+
+
+def _public_content_hub_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: Dict[str, Any] = {}
+        for key, entry in value.items():
+            if CONTENT_HUB_SECRET_KEY_RE.search(str(key)):
+                continue
+            sanitized = _public_content_hub_payload(entry)
+            if sanitized is not None:
+                output[key] = sanitized
+        return output
+    if isinstance(value, list):
+        output = []
+        for entry in value:
+            sanitized = _public_content_hub_payload(entry)
+            if sanitized is not None:
+                output.append(sanitized)
+        return output
+    if isinstance(value, str) and CONTENT_HUB_UNSAFE_VALUE_RE.search(value):
+        return None
+    return value
 
 
 def _safe_content_hub_timestamp(value: Any) -> str:
@@ -360,6 +441,99 @@ def _query_content_hub_metadata(hub_id: str, sk_prefix: str, environment: str) -
     return items if isinstance(items, list) else []
 
 
+def _load_content_hub_json_bundle(
+    key: str,
+    environment: str,
+    hub_id: str,
+    render_domain: str,
+    locale: str,
+    article_id: str,
+) -> Optional[Dict[str, Any]]:
+    bucket_name = _content_hub_packages_bucket_name(environment)
+    safe_key = _safe_content_hub_bundle_key(
+        key,
+        environment=environment,
+        hub_id=hub_id,
+        render_domain=render_domain,
+        locale=locale,
+        article_id=article_id,
+    )
+    if not bucket_name or not safe_key:
+        return None
+    try:
+        payload = load_json_from_s3(bucket_name, safe_key)
+    except Exception as exc:
+        log("WARNING", "Content hub public bundle read failed", error=str(exc))
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _public_content_hub_bundle(bundle: Optional[Dict[str, Any]], article: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(bundle, dict):
+        return None
+    if _safe_content_hub_id(bundle.get("articleId")) != _safe_content_hub_id(article.get("articleId")):
+        return None
+    bundle_path = _safe_content_hub_path(bundle.get("path"))
+    article_path = _safe_content_hub_path(article.get("path"))
+    if bundle_path and article_path and bundle_path != article_path:
+        return None
+    if str(bundle.get("status") or "published").strip() != "published":
+        return None
+
+    public_bundle = _public_content_hub_payload(bundle)
+    if not isinstance(public_bundle, dict):
+        return None
+    output: Dict[str, Any] = {}
+    for key in ("components", "structuredData"):
+        if isinstance(public_bundle.get(key), list):
+            output[key] = public_bundle[key]
+    for key in ("variables", "i18n", "seo", "analytics"):
+        if isinstance(public_bundle.get(key), dict):
+            output[key] = public_bundle[key]
+    return output or None
+
+
+def _content_hub_bundle_for_path(
+    site_config: Optional[Dict[str, Any]],
+    path: str,
+    lang: str,
+    environment: str,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(site_config, dict) or not _content_hub_table_name(environment) or not _content_hub_packages_bucket_name(environment):
+        return None
+    runtime = site_config.get("runtime")
+    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
+    if not isinstance(hubs, list):
+        return None
+
+    normalized_path = normalize_route_path(path)
+    render_domain = normalize_domain(site_config.get("domain"))
+    if not render_domain:
+        return None
+    for hub in hubs:
+        if not isinstance(hub, dict):
+            continue
+        hub_id = _safe_content_hub_id(hub.get("hubId"))
+        if not hub_id:
+            continue
+        locale = _content_hub_locale(hub, lang)
+        for item in _query_content_hub_metadata(hub_id, "ARTICLE#", environment):
+            article = _content_hub_article_summary(item, hub, locale)
+            if not article or _safe_content_hub_path(article.get("path")) != normalized_path:
+                continue
+            article_id = _safe_content_hub_id(article.get("articleId"))
+            bundle = _load_content_hub_json_bundle(
+                str(item.get("publishedBundleKey") or ""),
+                environment,
+                hub_id,
+                render_domain,
+                locale,
+                article_id,
+            )
+            return _public_content_hub_bundle(bundle, article)
+    return None
+
+
 def _dedupe_content_hub_items(items: list[Dict[str, Any]], key_fields: tuple[str, ...]) -> list[Dict[str, Any]]:
     output: list[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -455,21 +629,38 @@ def _content_hub_public_variables(site_config: Optional[Dict[str, Any]], path: s
     hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
     if not isinstance(hubs, list) or not hubs:
         return None
-    hub = next((entry for entry in hubs if isinstance(entry, dict)), None)
-    if not hub:
+    valid_hubs = [entry for entry in hubs if isinstance(entry, dict)]
+    if not valid_hubs:
         return None
-    articles = [item for item in hub.get("publicArticles", []) if isinstance(item, dict)]
-    taxonomy = [item for item in hub.get("publicTaxonomy", []) if isinstance(item, dict)]
+    articles = [
+        item
+        for hub in valid_hubs
+        for item in (hub.get("publicArticles", []) if isinstance(hub.get("publicArticles"), list) else [])
+        if isinstance(item, dict)
+    ]
+    taxonomy = [
+        item
+        for hub in valid_hubs
+        for item in (hub.get("publicTaxonomy", []) if isinstance(hub.get("publicTaxonomy"), list) else [])
+        if isinstance(item, dict)
+    ]
     categories = [item for item in taxonomy if item.get("kind") == "category"]
     tags = [item for item in taxonomy if item.get("kind") == "tag"]
     normalized_path = normalize_route_path(path)
-    current_article = next((
-        item for item in articles
-        if _safe_content_hub_path(item.get("path")) == normalized_path
-    ), None)
+    current_article = None
+    current_hub = valid_hubs[0]
+    for hub_entry in valid_hubs:
+        hub_articles = hub_entry.get("publicArticles", []) if isinstance(hub_entry.get("publicArticles"), list) else []
+        current_article = next((
+            item for item in hub_articles
+            if isinstance(item, dict) and _safe_content_hub_path(item.get("path")) == normalized_path
+        ), None)
+        if current_article:
+            current_hub = hub_entry
+            break
     return {
-        "hubId": hub.get("hubId"),
-        "routeBasePath": hub.get("routeBasePath") or "/blog",
+        "hubId": current_hub.get("hubId"),
+        "routeBasePath": current_hub.get("routeBasePath") or "/blog",
         "publicArticles": {"items": articles},
         "publicTaxonomy": {"items": taxonomy},
         "categories": {"items": categories},
@@ -477,6 +668,33 @@ def _content_hub_public_variables(site_config: Optional[Dict[str, Any]], path: s
         "articleCount": len(articles),
         "currentArticle": current_article or {},
     }
+
+
+def _route_pattern_matches(pattern: Any, path: str) -> bool:
+    route_path = normalize_route_path(pattern or "")
+    normalized_path = normalize_route_path(path)
+    if not route_path or ":" not in route_path:
+        return route_path == normalized_path
+    route_segments = [segment for segment in route_path.split("/") if segment]
+    path_segments = [segment for segment in normalized_path.split("/") if segment]
+    return len(route_segments) == len(path_segments) and all(
+        route_segment.startswith(":") or route_segment == path_segment
+        for route_segment, path_segment in zip(route_segments, path_segments)
+    )
+
+
+def _is_content_hub_article_path(site_config: Optional[Dict[str, Any]], path: str) -> bool:
+    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
+    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
+    if not isinstance(hubs, list):
+        return False
+    for hub in hubs:
+        if not isinstance(hub, dict):
+            continue
+        pattern = hub.get("articlePathPattern")
+        if pattern and _route_pattern_matches(pattern, path):
+            return True
+    return False
 
 
 def _merge_content_hub_variables(
@@ -493,6 +711,19 @@ def _merge_content_hub_variables(
         variables = {}
     variables["contentHub"] = _deep_merge(variables.get("contentHub"), content_hub)
     payload["variables"] = variables
+    return payload
+
+
+def _merge_content_hub_bundle_variables(
+    variables_payload: Optional[Dict[str, Any]],
+    article_bundle: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    bundle_variables = article_bundle.get("variables") if isinstance(article_bundle, dict) else None
+    if not isinstance(bundle_variables, dict):
+        return variables_payload
+    payload = copy.deepcopy(variables_payload) if isinstance(variables_payload, dict) else {"version": 1, "variables": {}}
+    variables = payload.get("variables") if isinstance(payload.get("variables"), dict) else {}
+    payload["variables"] = _deep_merge(variables, bundle_variables)
     return payload
 
 
@@ -545,6 +776,48 @@ def _merge_content_hub_page_config_seo(
         seo["title"] = f"{title} | {site_name}" if site_name and site_name not in title else title
     if summary:
         seo["description"] = summary
+    if canonical:
+        seo["canonical"] = canonical
+    if robots:
+        seo["robots"] = {"default": robots}
+    enriched["seo"] = seo
+    return enriched
+
+
+def _absolute_content_hub_canonical(site_config: Optional[Dict[str, Any]], canonical: Any) -> Optional[str]:
+    path = _safe_content_hub_path(canonical)
+    if not path:
+        return None
+    seo = _site_seo_config(site_config)
+    origin = str(seo.get("canonicalOrigin") or "").strip().rstrip("/")
+    if not origin.startswith("https://"):
+        domain = str((site_config or {}).get("domain") or "").strip()
+        origin = f"https://{domain}" if domain else ""
+    return f"{origin}{path}" if origin else path
+
+
+def _merge_content_hub_bundle_page_config_seo(
+    page_config: Optional[Dict[str, Any]],
+    site_config: Optional[Dict[str, Any]],
+    article_bundle: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    bundle_seo = article_bundle.get("seo") if isinstance(article_bundle, dict) else None
+    if not isinstance(page_config, dict) or not isinstance(bundle_seo, dict):
+        return page_config
+
+    enriched = copy.deepcopy(page_config)
+    seo = enriched.get("seo") if isinstance(enriched.get("seo"), dict) else {}
+    site_seo = _site_seo_config(site_config)
+    site_name = str(site_seo.get("siteName") or (site_config or {}).get("domain") or "").strip()
+    title = _safe_content_hub_text(bundle_seo.get("title"), 160)
+    description = _safe_content_hub_text(bundle_seo.get("description"), 320)
+    canonical = _absolute_content_hub_canonical(site_config, bundle_seo.get("canonical"))
+    robots = _safe_content_hub_text(bundle_seo.get("robots"), 160)
+
+    if title:
+        seo["title"] = f"{title} | {site_name}" if site_name and site_name not in title else title
+    if description:
+        seo["description"] = description
     if canonical:
         seo["canonical"] = canonical
     if robots:
@@ -671,6 +944,34 @@ def _merge_components(
     }
 
 
+def _merge_content_hub_bundle_components(
+    components_payload: Dict[str, Any],
+    article_bundle: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    bundle_components = article_bundle.get("components") if isinstance(article_bundle, dict) else None
+    if not isinstance(bundle_components, list):
+        return components_payload
+
+    merged: dict[str, dict[str, Any]] = {}
+    for component in components_payload.get("components", []):
+        if not isinstance(component, dict):
+            continue
+        component_id = str(component.get("id") or "").strip()
+        if component_id:
+            merged[component_id] = component
+    for component in bundle_components:
+        if not isinstance(component, dict):
+            continue
+        component_id = str(component.get("id") or "").strip()
+        component_type = str(component.get("type") or "").strip()
+        if component_id and component_type:
+            merged[component_id] = component
+
+    output = copy.deepcopy(components_payload)
+    output["components"] = list(merged.values())
+    return output
+
+
 def _merge_variables(
     domain: str,
     page_id: str,
@@ -734,6 +1035,23 @@ def _merge_i18n(
         "lang": str((page_payload or shared_payload or {}).get("lang") or lang),
         "dictionary": _deep_merge(shared_dictionary, page_dictionary),
     }
+
+
+def _merge_content_hub_bundle_i18n(
+    i18n_payload: Optional[Dict[str, Any]],
+    article_bundle: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    bundle_i18n = article_bundle.get("i18n") if isinstance(article_bundle, dict) else None
+    if not isinstance(bundle_i18n, dict):
+        return i18n_payload
+    bundle_dictionary = bundle_i18n.get("dictionary") if isinstance(bundle_i18n.get("dictionary"), dict) else bundle_i18n
+    if not isinstance(bundle_dictionary, dict):
+        return i18n_payload
+
+    payload = copy.deepcopy(i18n_payload) if isinstance(i18n_payload, dict) else {"version": 1, "dictionary": {}}
+    dictionary = payload.get("dictionary") if isinstance(payload.get("dictionary"), dict) else {}
+    payload["dictionary"] = _deep_merge(dictionary, bundle_dictionary)
+    return payload
 
 
 def _fallback_bundle(domain: str, page_id: str, metadata: Dict[str, Any], lifecycle: Dict[str, Any]) -> Dict[str, Any]:
@@ -891,16 +1209,33 @@ def _published_bundle(
     payloads: Dict[str, Any],
     not_found_status: bool = False,
     fallback_from_domain: Optional[str] = None,
+    article_bundle: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if article_bundle is None and not not_found_status:
+        article_bundle = _content_hub_bundle_for_path(payloads["siteConfig"], path, lang, environment)
     variables_payload = _merge_content_hub_variables(
         _merge_variables(domain, page_id, payloads["sharedVariables"], payloads["pageVariables"]),
         payloads["siteConfig"],
         path,
     )
+    variables_payload = _merge_content_hub_bundle_variables(variables_payload, article_bundle)
     page_config = _merge_content_hub_page_config_seo(
         payloads["pageConfig"],
         payloads["siteConfig"],
         variables_payload,
+    )
+    page_config = _merge_content_hub_bundle_page_config_seo(
+        page_config,
+        payloads["siteConfig"],
+        article_bundle,
+    )
+    components_payload = _merge_content_hub_bundle_components(
+        _merge_components(domain, page_id, payloads["sharedComponents"], payloads["pageComponents"]),
+        article_bundle,
+    )
+    i18n_payload = _merge_content_hub_bundle_i18n(
+        _merge_i18n(domain, page_id, lang, payloads["sharedI18n"], payloads["pageI18n"]),
+        article_bundle,
     )
     return {
         "version": 1,
@@ -915,10 +1250,10 @@ def _published_bundle(
         "lifecycle": lifecycle,
         "siteConfig": _public_site_config(payloads["siteConfig"]),
         "pageConfig": page_config,
-        "components": _merge_components(domain, page_id, payloads["sharedComponents"], payloads["pageComponents"]),
+        "components": components_payload,
         "variables": variables_payload,
         "angoraCombos": _merge_angora_combos(domain, page_id, payloads["sharedAngoraCombos"], payloads["pageAngoraCombos"]),
-        "i18n": _merge_i18n(domain, page_id, lang, payloads["sharedI18n"], payloads["pageI18n"]),
+        "i18n": i18n_payload,
         "metadata": {
             "requestId": request_id,
             "requestedDomain": requested_domain,
@@ -1052,6 +1387,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         route = _resolve_route(metadata, site_config, path)
         should_render_not_found = False
+        article_bundle = None
         if route:
             page_id = str(route.get("pageId") or _resolve_default_page_id(metadata, site_config)).strip() or "default"
         elif path == "/":
@@ -1060,6 +1396,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             page_id = _resolve_not_found_page_id(metadata, site_config)
             should_render_not_found = True
             route = _resolve_route(metadata, site_config, "/404")
+
+        if not should_render_not_found and _is_content_hub_article_path(site_config, path):
+            article_bundle = _content_hub_bundle_for_path(site_config, path, lang, environment)
+            if not article_bundle:
+                page_id = _resolve_not_found_page_id(metadata, site_config)
+                should_render_not_found = True
+                route = _resolve_route(metadata, site_config, "/404")
 
         if should_render_not_found and not page_id:
             return _canonical_not_found_response(
@@ -1106,6 +1449,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             page_id=page_id,
             payloads=payloads,
             not_found_status=should_render_not_found,
+            article_bundle=article_bundle if not should_render_not_found else None,
         ))
     except Exception as exc:
         log("ERROR", "Runtime bundle read failed", requestId=request_id, domain=requested_domain, path=path, error=str(exc))

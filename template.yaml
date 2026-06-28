@@ -32,6 +32,22 @@ Parameters:
     Type: String
     Default: ''
     Description: Optional production content-hub metadata table used when environment=prod or production.
+  ContentHubPackagesBucketName:
+    Type: String
+    Default: ''
+    Description: Optional content-hub package bucket used to read published public article bundles.
+  ContentHubPackagesBucketNameDev:
+    Type: String
+    Default: ''
+    Description: Optional dev content-hub package bucket used when environment=dev.
+  ContentHubPackagesBucketNameTest:
+    Type: String
+    Default: ''
+    Description: Optional test content-hub package bucket used when environment=test.
+  ContentHubPackagesBucketNameProd:
+    Type: String
+    Default: ''
+    Description: Optional production content-hub package bucket used when environment=prod or production.
   LogLevel:
     Type: String
     Default: INFO
@@ -58,6 +74,26 @@ Conditions:
     Fn::Not:
       - Fn::Equals:
           - Ref: ContentHubMetadataTableNameProd
+          - ''
+  HasContentHubPackagesBucket:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ContentHubPackagesBucketName
+          - ''
+  HasContentHubPackagesBucketDev:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ContentHubPackagesBucketNameDev
+          - ''
+  HasContentHubPackagesBucketTest:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ContentHubPackagesBucketNameTest
+          - ''
+  HasContentHubPackagesBucketProd:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ContentHubPackagesBucketNameProd
           - ''
 
 Globals:
@@ -110,6 +146,14 @@ Resources:
             Ref: ContentHubMetadataTableNameTest
           CONTENT_HUB_METADATA_TABLE_NAME_PROD:
             Ref: ContentHubMetadataTableNameProd
+          CONTENT_HUB_PACKAGES_BUCKET_NAME:
+            Ref: ContentHubPackagesBucketName
+          CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV:
+            Ref: ContentHubPackagesBucketNameDev
+          CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST:
+            Ref: ContentHubPackagesBucketNameTest
+          CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD:
+            Ref: ContentHubPackagesBucketNameProd
           ENVIRONMENT_NAME:
             Ref: EnvironmentName
           LOG_LEVEL:
@@ -159,6 +203,38 @@ Resources:
                 - s3:GetObject
               Resource:
                 Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/*
+            - Fn::If:
+                - HasContentHubPackagesBucket
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                  Resource:
+                    Fn::Sub: arn:aws:s3:::${ContentHubPackagesBucketName}/content-hubs/*
+                - Ref: AWS::NoValue
+            - Fn::If:
+                - HasContentHubPackagesBucketDev
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                  Resource:
+                    Fn::Sub: arn:aws:s3:::${ContentHubPackagesBucketNameDev}/content-hubs/*
+                - Ref: AWS::NoValue
+            - Fn::If:
+                - HasContentHubPackagesBucketTest
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                  Resource:
+                    Fn::Sub: arn:aws:s3:::${ContentHubPackagesBucketNameTest}/content-hubs/*
+                - Ref: AWS::NoValue
+            - Fn::If:
+                - HasContentHubPackagesBucketProd
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                  Resource:
+                    Fn::Sub: arn:aws:s3:::${ContentHubPackagesBucketNameProd}/content-hubs/*
+                - Ref: AWS::NoValue
             - Effect: Allow
               Action:
                 - s3:ListBucket
