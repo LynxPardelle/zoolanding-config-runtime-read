@@ -16,11 +16,49 @@ Parameters:
     Type: String
     Default: zoolanding-config-payloads
     Description: S3 bucket that stores versioned site payloads.
+  ContentHubMetadataTableName:
+    Type: String
+    Default: ''
+    Description: Optional content-hub metadata table used to project published public article indexes.
+  ContentHubMetadataTableNameDev:
+    Type: String
+    Default: ''
+    Description: Optional dev content-hub metadata table used when environment=dev.
+  ContentHubMetadataTableNameTest:
+    Type: String
+    Default: ''
+    Description: Optional test content-hub metadata table used when environment=test.
+  ContentHubMetadataTableNameProd:
+    Type: String
+    Default: ''
+    Description: Optional production content-hub metadata table used when environment=prod or production.
   LogLevel:
     Type: String
     Default: INFO
     AllowedValues: [DEBUG, INFO, WARNING, ERROR]
     Description: Log level for the Lambda.
+
+Conditions:
+  HasContentHubMetadataTable:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ContentHubMetadataTableName
+          - ''
+  HasContentHubMetadataTableDev:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ContentHubMetadataTableNameDev
+          - ''
+  HasContentHubMetadataTableTest:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ContentHubMetadataTableNameTest
+          - ''
+  HasContentHubMetadataTableProd:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ContentHubMetadataTableNameProd
+          - ''
 
 Globals:
   Function:
@@ -64,6 +102,14 @@ Resources:
             Ref: ConfigTableName
           CONFIG_PAYLOADS_BUCKET_NAME:
             Ref: ConfigPayloadsBucketName
+          CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ContentHubMetadataTableName
+          CONTENT_HUB_METADATA_TABLE_NAME_DEV:
+            Ref: ContentHubMetadataTableNameDev
+          CONTENT_HUB_METADATA_TABLE_NAME_TEST:
+            Ref: ContentHubMetadataTableNameTest
+          CONTENT_HUB_METADATA_TABLE_NAME_PROD:
+            Ref: ContentHubMetadataTableNameProd
           ENVIRONMENT_NAME:
             Ref: EnvironmentName
           LOG_LEVEL:
@@ -76,6 +122,38 @@ Resources:
                 - dynamodb:GetItem
               Resource:
                 Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigTableName}
+            - Fn::If:
+                - HasContentHubMetadataTable
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Query
+                  Resource:
+                    Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableName}
+                - Ref: AWS::NoValue
+            - Fn::If:
+                - HasContentHubMetadataTableDev
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Query
+                  Resource:
+                    Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableNameDev}
+                - Ref: AWS::NoValue
+            - Fn::If:
+                - HasContentHubMetadataTableTest
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Query
+                  Resource:
+                    Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableNameTest}
+                - Ref: AWS::NoValue
+            - Fn::If:
+                - HasContentHubMetadataTableProd
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Query
+                  Resource:
+                    Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableNameProd}
+                - Ref: AWS::NoValue
             - Effect: Allow
               Action:
                 - s3:GetObject

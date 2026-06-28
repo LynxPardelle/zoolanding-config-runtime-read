@@ -1,4 +1,6 @@
+import copy
 import os
+import re
 from typing import Any, Dict, Optional
 
 from zoolanding_lambda_common import (
@@ -8,6 +10,7 @@ from zoolanding_lambda_common import (
     get_header_value,
     get_query_value,
     get_request_id,
+    get_table,
     join_s3_key,
     load_item,
     load_json_from_s3,
@@ -25,6 +28,11 @@ from zoolanding_lambda_common import (
 CONFIG_TABLE_NAME = os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry")
 CONFIG_PAYLOADS_BUCKET_NAME = os.getenv("CONFIG_PAYLOADS_BUCKET_NAME", "zoolanding-config-payloads")
 CANONICAL_NOT_FOUND_DOMAIN = os.getenv("CANONICAL_NOT_FOUND_DOMAIN", "zoolandingpage.com.mx")
+CONTENT_HUB_METADATA_TABLE_NAME = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME", "").strip()
+CONTENT_HUB_METADATA_TABLE_NAME_DEV = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_DEV", "").strip()
+CONTENT_HUB_METADATA_TABLE_NAME_TEST = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_TEST", "").strip()
+CONTENT_HUB_METADATA_TABLE_NAME_PROD = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_PROD", "").strip()
+SAFE_CONTENT_HUB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 def _is_record(value: Any) -> bool:
@@ -182,6 +190,378 @@ def _public_content_hubs(metadata: Dict[str, Any]) -> list[Dict[str, Any]]:
         }
         public_hubs.append(public_hub)
     return public_hubs
+
+
+def _content_hub_table_name(environment: Optional[str] = None) -> str:
+    normalized_environment = _normalize_environment(environment) if environment else ""
+    env_specific = {
+        "dev": os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_DEV", CONTENT_HUB_METADATA_TABLE_NAME_DEV).strip(),
+        "test": os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_TEST", CONTENT_HUB_METADATA_TABLE_NAME_TEST).strip(),
+        "production": os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_PROD", CONTENT_HUB_METADATA_TABLE_NAME_PROD).strip(),
+    }.get(normalized_environment, "")
+    return env_specific or os.getenv("CONTENT_HUB_METADATA_TABLE_NAME", CONTENT_HUB_METADATA_TABLE_NAME).strip()
+
+
+def _safe_content_hub_id(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if SAFE_CONTENT_HUB_ID_RE.fullmatch(text) else ""
+
+
+def _safe_content_hub_path(value: Any) -> str:
+    raw_path = str(value or "").strip()
+    if not raw_path:
+        return ""
+    path = normalize_route_path(raw_path)
+    if not path.startswith("/") or path.startswith("//") or "\\" in path or re.search(r"[\s\x00-\x1f\x7f]", path):
+        return ""
+    return path
+
+
+def _safe_content_hub_text(value: Any, max_length: int) -> str:
+    text = str(value or "").strip()
+    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
+        return ""
+    return text[:max_length]
+
+
+def _safe_content_hub_timestamp(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if text and re.fullmatch(r"\d{4}-\d{2}-\d{2}T[0-9:.+-]+Z?", text) else ""
+
+
+def _content_hub_locale(hub: Dict[str, Any], lang: str) -> str:
+    requested = _safe_content_hub_id(lang.lower())
+    locales = hub.get("locales")
+    allowed = {str(entry).strip().lower() for entry in locales} if isinstance(locales, list) else set()
+    if requested and (not allowed or requested in allowed):
+        return requested
+    return _safe_content_hub_id(str(hub.get("defaultLocale") or hub.get("defaultLanguage") or "es").lower()) or "es"
+
+
+def _content_hub_taxonomy_slug(value: Any) -> str:
+    if isinstance(value, str):
+        return _safe_content_hub_id(value)
+    if isinstance(value, dict):
+        for field in ("slug", "taxonomyId", "label"):
+            safe = _safe_content_hub_id(value.get(field))
+            if safe:
+                return safe
+    return ""
+
+
+def _content_hub_tags(value: Any) -> list[str]:
+    raw_items = [part.strip() for part in value.split(",")] if isinstance(value, str) else value
+    if not isinstance(raw_items, list):
+        return []
+    tags: list[str] = []
+    seen: set[str] = set()
+    for entry in raw_items:
+        tag = _content_hub_taxonomy_slug(entry)
+        if tag and tag not in seen:
+            seen.add(tag)
+            tags.append(tag)
+    return tags[:20]
+
+
+def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], locale: str) -> Optional[Dict[str, Any]]:
+    if str(item.get("status") or "").strip() != "published":
+        return None
+    if str(item.get("visibility") or "").strip() != "public":
+        return None
+
+    item_locale = _safe_content_hub_id(str(item.get("primaryLocale") or locale).lower())
+    if item_locale and item_locale != locale:
+        return None
+
+    article_id = _safe_content_hub_id(item.get("articleId"))
+    title = _safe_content_hub_text(item.get("title"), 160)
+    path = _safe_content_hub_path(item.get("path"))
+    published_at = _safe_content_hub_timestamp(item.get("publishedAt") or item.get("updatedAt"))
+    if not article_id or not title or not path or not published_at:
+        return None
+
+    category_slug = _content_hub_taxonomy_slug(item.get("category"))
+    tags = _content_hub_tags(item.get("tags"))
+    robots = str(item.get("robots") or "index,follow").strip()
+    if robots not in {"index,follow", "noindex,follow", "noindex,nofollow"}:
+        robots = "index,follow"
+
+    summary: Dict[str, Any] = {
+        "articleId": article_id,
+        "locale": item_locale or locale,
+        "status": "published",
+        "title": title,
+        "path": path,
+        "publishedAt": published_at,
+        "robots": robots,
+    }
+    description = _safe_content_hub_text(item.get("summary") or item.get("seoDescription"), 320)
+    updated_at = _safe_content_hub_timestamp(item.get("updatedAt"))
+    author_label = _safe_content_hub_text(item.get("authorLabel"), 120)
+    canonical_path = _safe_content_hub_path(item.get("canonicalPath") or item.get("canonicalUrl"))
+    if description:
+        summary["summary"] = description
+    if category_slug:
+        summary["categorySlug"] = category_slug
+    if tags:
+        summary["tags"] = tags
+    if updated_at:
+        summary["updatedAt"] = updated_at
+    if author_label:
+        summary["authorLabel"] = author_label
+    if canonical_path:
+        summary["canonicalPath"] = canonical_path
+    elif path:
+        summary["canonicalPath"] = path
+    return summary
+
+
+def _content_hub_taxonomy_summary(item: Dict[str, Any], default_kind: str, locale: str) -> Optional[Dict[str, Any]]:
+    kind = str(item.get("kind") or default_kind).strip()
+    if kind not in {"category", "tag"}:
+        return None
+    if item.get("visible") is False:
+        return None
+    item_locale = _safe_content_hub_id(str(item.get("locale") or locale).lower())
+    if item_locale and item_locale != locale:
+        return None
+    taxonomy_id = _safe_content_hub_id(item.get("taxonomyId") or item.get("slug") or item.get("label"))
+    slug = _safe_content_hub_id(item.get("slug") or taxonomy_id)
+    label = _safe_content_hub_text(item.get("label") or slug, 120)
+    if not taxonomy_id or not slug or not label:
+        return None
+    summary: Dict[str, Any] = {
+        "taxonomyId": taxonomy_id,
+        "kind": kind,
+        "slug": slug,
+        "label": label,
+        "locale": item_locale or locale,
+        "visible": True,
+    }
+    if kind == "category":
+        summary["path"] = _safe_content_hub_path(item.get("path") or f"/blog/{slug}")
+    return summary
+
+
+def _query_content_hub_metadata(hub_id: str, sk_prefix: str, environment: str) -> list[Dict[str, Any]]:
+    table_name = _content_hub_table_name(environment)
+    if not table_name:
+        return []
+    try:
+        response = get_table(table_name).query(
+            KeyConditionExpression="pk = :pk AND begins_with(sk, :sk)",
+            ExpressionAttributeValues={":pk": f"HUB#{hub_id}", ":sk": sk_prefix},
+            Limit=200,
+        )
+    except Exception as exc:
+        log("WARNING", "Content hub public index query failed", hubId=hub_id, skPrefix=sk_prefix, error=str(exc))
+        return []
+    items = response.get("Items")
+    return items if isinstance(items, list) else []
+
+
+def _dedupe_content_hub_items(items: list[Dict[str, Any]], key_fields: tuple[str, ...]) -> list[Dict[str, Any]]:
+    output: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        key = "|".join(str(item.get(field) or "") for field in key_fields)
+        if not key.strip("|") or key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
+
+
+def _content_hub_taxonomy_from_articles(articles: list[Dict[str, Any]], locale: str) -> list[Dict[str, Any]]:
+    taxonomy: list[Dict[str, Any]] = []
+    for article in articles:
+        category = _safe_content_hub_id(article.get("categorySlug"))
+        if category:
+            taxonomy.append({
+                "taxonomyId": category,
+                "kind": "category",
+                "slug": category,
+                "label": category.replace("-", " ").title(),
+                "locale": locale,
+                "visible": True,
+                "path": f"/blog/{category}",
+            })
+        for tag in article.get("tags") or []:
+            safe_tag = _safe_content_hub_id(tag)
+            if safe_tag:
+                taxonomy.append({
+                    "taxonomyId": safe_tag,
+                    "kind": "tag",
+                    "slug": safe_tag,
+                    "label": safe_tag.replace("-", " ").title(),
+                    "locale": locale,
+                    "visible": True,
+                })
+    return taxonomy
+
+
+def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], lang: str, environment: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(site_config, dict) or not _content_hub_table_name(environment):
+        return site_config
+    runtime = site_config.get("runtime")
+    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
+    if not isinstance(hubs, list):
+        return site_config
+
+    enriched = copy.deepcopy(site_config)
+    enriched_hubs = enriched["runtime"]["contentHubs"]
+    for hub in enriched_hubs:
+        if not isinstance(hub, dict):
+            continue
+        hub_id = _safe_content_hub_id(hub.get("hubId"))
+        if not hub_id:
+            continue
+        locale = _content_hub_locale(hub, lang)
+        dynamic_articles = [
+            article
+            for item in _query_content_hub_metadata(hub_id, "ARTICLE#", environment)
+            for article in [_content_hub_article_summary(item, hub, locale)]
+            if article
+        ]
+        existing_articles = hub.get("publicArticles") if isinstance(hub.get("publicArticles"), list) else []
+        merged_articles = _dedupe_content_hub_items(
+            sorted(dynamic_articles, key=lambda item: str(item.get("publishedAt") or ""), reverse=True)
+            + [item for item in existing_articles if isinstance(item, dict)],
+            ("articleId",),
+        )
+        if merged_articles:
+            hub["publicArticles"] = merged_articles
+
+        dynamic_taxonomy = [
+            taxonomy
+            for item in _query_content_hub_metadata(hub_id, "TAXONOMY#", environment)
+            for taxonomy in [_content_hub_taxonomy_summary(item, "", locale)]
+            if taxonomy
+        ]
+        existing_taxonomy = hub.get("publicTaxonomy") if isinstance(hub.get("publicTaxonomy"), list) else []
+        merged_taxonomy = _dedupe_content_hub_items(
+            dynamic_taxonomy
+            + _content_hub_taxonomy_from_articles(merged_articles, locale)
+            + [item for item in existing_taxonomy if isinstance(item, dict)],
+            ("kind", "slug"),
+        )
+        if merged_taxonomy:
+            hub["publicTaxonomy"] = merged_taxonomy
+    return enriched
+
+
+def _content_hub_public_variables(site_config: Optional[Dict[str, Any]], path: str) -> Optional[Dict[str, Any]]:
+    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
+    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
+    if not isinstance(hubs, list) or not hubs:
+        return None
+    hub = next((entry for entry in hubs if isinstance(entry, dict)), None)
+    if not hub:
+        return None
+    articles = [item for item in hub.get("publicArticles", []) if isinstance(item, dict)]
+    taxonomy = [item for item in hub.get("publicTaxonomy", []) if isinstance(item, dict)]
+    categories = [item for item in taxonomy if item.get("kind") == "category"]
+    tags = [item for item in taxonomy if item.get("kind") == "tag"]
+    normalized_path = normalize_route_path(path)
+    current_article = next((
+        item for item in articles
+        if _safe_content_hub_path(item.get("path")) == normalized_path
+    ), None)
+    return {
+        "hubId": hub.get("hubId"),
+        "routeBasePath": hub.get("routeBasePath") or "/blog",
+        "publicArticles": {"items": articles},
+        "publicTaxonomy": {"items": taxonomy},
+        "categories": {"items": categories},
+        "tags": {"items": tags},
+        "articleCount": len(articles),
+        "currentArticle": current_article or {},
+    }
+
+
+def _merge_content_hub_variables(
+    variables_payload: Optional[Dict[str, Any]],
+    site_config: Optional[Dict[str, Any]],
+    path: str,
+) -> Optional[Dict[str, Any]]:
+    content_hub = _content_hub_public_variables(site_config, path)
+    if not content_hub:
+        return variables_payload
+    payload = copy.deepcopy(variables_payload) if isinstance(variables_payload, dict) else {"version": 1, "variables": {}}
+    variables = payload.get("variables")
+    if not isinstance(variables, dict):
+        variables = {}
+    variables["contentHub"] = _deep_merge(variables.get("contentHub"), content_hub)
+    payload["variables"] = variables
+    return payload
+
+
+def _content_hub_current_article(variables_payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    variables = variables_payload.get("variables") if isinstance(variables_payload, dict) else None
+    content_hub = variables.get("contentHub") if isinstance(variables, dict) else None
+    article = content_hub.get("currentArticle") if isinstance(content_hub, dict) else None
+    return article if isinstance(article, dict) and article.get("articleId") else None
+
+
+def _site_seo_config(site_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    site = site_config.get("site") if isinstance(site_config, dict) else None
+    seo = site.get("seo") if isinstance(site, dict) else None
+    return seo if isinstance(seo, dict) else {}
+
+
+def _article_canonical_url(site_config: Optional[Dict[str, Any]], article: Dict[str, Any]) -> Optional[str]:
+    path = _safe_content_hub_path(article.get("canonicalPath")) or _safe_content_hub_path(article.get("path"))
+    if not path:
+        return None
+    seo = _site_seo_config(site_config)
+    origin = str(seo.get("canonicalOrigin") or "").strip().rstrip("/")
+    if not origin.startswith("https://"):
+        domain = str((site_config or {}).get("domain") or "").strip()
+        origin = f"https://{domain}" if domain else ""
+    return f"{origin}{path}" if origin else path
+
+
+def _merge_content_hub_page_config_seo(
+    page_config: Optional[Dict[str, Any]],
+    site_config: Optional[Dict[str, Any]],
+    variables_payload: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    article = _content_hub_current_article(variables_payload)
+    if not isinstance(page_config, dict) or not article:
+        return page_config
+
+    title = str(article.get("title") or "").strip()
+    summary = str(article.get("summary") or "").strip()
+    robots = str(article.get("robots") or "").strip()
+    canonical = _article_canonical_url(site_config, article)
+    if not any((title, summary, robots, canonical)):
+        return page_config
+
+    enriched = copy.deepcopy(page_config)
+    seo = enriched.get("seo") if isinstance(enriched.get("seo"), dict) else {}
+    site_seo = _site_seo_config(site_config)
+    site_name = str(site_seo.get("siteName") or (site_config or {}).get("domain") or "").strip()
+    if title:
+        seo["title"] = f"{title} | {site_name}" if site_name and site_name not in title else title
+    if summary:
+        seo["description"] = summary
+    if canonical:
+        seo["canonical"] = canonical
+    if robots:
+        seo["robots"] = {"default": robots}
+    enriched["seo"] = seo
+    return enriched
+
+
+def _public_site_config(site_config: Dict[str, Any]) -> Dict[str, Any]:
+    public_config = copy.deepcopy(site_config)
+    if isinstance(public_config.get("contentHubs"), list):
+        public_hubs = _public_content_hubs(public_config)
+        if public_hubs:
+            public_config["contentHubs"] = public_hubs
+        else:
+            public_config.pop("contentHubs", None)
+    return public_config
 
 
 def _match_route(metadata: Dict[str, Any], path: str) -> Optional[Dict[str, Any]]:
@@ -512,6 +892,16 @@ def _published_bundle(
     not_found_status: bool = False,
     fallback_from_domain: Optional[str] = None,
 ) -> Dict[str, Any]:
+    variables_payload = _merge_content_hub_variables(
+        _merge_variables(domain, page_id, payloads["sharedVariables"], payloads["pageVariables"]),
+        payloads["siteConfig"],
+        path,
+    )
+    page_config = _merge_content_hub_page_config_seo(
+        payloads["pageConfig"],
+        payloads["siteConfig"],
+        variables_payload,
+    )
     return {
         "version": 1,
         "domain": domain,
@@ -523,10 +913,10 @@ def _published_bundle(
         "generatedAt": now_iso(),
         "route": route,
         "lifecycle": lifecycle,
-        "siteConfig": payloads["siteConfig"],
-        "pageConfig": payloads["pageConfig"],
+        "siteConfig": _public_site_config(payloads["siteConfig"]),
+        "pageConfig": page_config,
         "components": _merge_components(domain, page_id, payloads["sharedComponents"], payloads["pageComponents"]),
-        "variables": _merge_variables(domain, page_id, payloads["sharedVariables"], payloads["pageVariables"]),
+        "variables": variables_payload,
         "angoraCombos": _merge_angora_combos(domain, page_id, payloads["sharedAngoraCombos"], payloads["pageAngoraCombos"]),
         "i18n": _merge_i18n(domain, page_id, lang, payloads["sharedI18n"], payloads["pageI18n"]),
         "metadata": {
@@ -649,6 +1039,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return not_found("Published configuration prefix is missing", domain=domain)
 
         site_config = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/site-config.json")
+        site_config = _merge_content_hub_runtime_indexes(site_config, lang, environment)
         if not site_config:
             return _canonical_not_found_response(
                 request_id=request_id,
