@@ -10,6 +10,14 @@ capabilities = "CAPABILITY_IAM"
 parameter_overrides = [
   "ConfigTableName=zoolanding-config-registry",
   "ConfigPayloadsBucketName=zoolanding-config-payloads",
+  "ContentHubMetadataTableName=zoolanding-content-hub-prod-ContentHubMetadataTable-IQ1WMU24XMPB",
+  "ContentHubMetadataTableNameDev=zoolanding-content-hub-dev-ContentHubMetadataTable-9AIQ90DOPXNH",
+  "ContentHubMetadataTableNameTest=zoolanding-content-hub-test-ContentHubMetadataTable-ZV7P652CS11F",
+  "ContentHubMetadataTableNameProd=zoolanding-content-hub-prod-ContentHubMetadataTable-IQ1WMU24XMPB",
+  "ContentHubPackagesBucketName=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
+  "ContentHubPackagesBucketNameDev=zoolanding-content-hub-de-contenthubpackagesbucket-wbbdbckwpzcd",
+  "ContentHubPackagesBucketNameTest=zoolanding-content-hub-te-contenthubpackagesbucket-gdgtasj0yb0o",
+  "ContentHubPackagesBucketNameProd=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
   "LogLevel=INFO"
 ]
 
@@ -24,6 +32,14 @@ parameter_overrides = [
   "EnvironmentName=dev",
   "ConfigTableName=zoolanding-config-registry-dev",
   "ConfigPayloadsBucketName=zoolanding-config-payloads-dev",
+  "ContentHubMetadataTableName=zoolanding-content-hub-dev-ContentHubMetadataTable-9AIQ90DOPXNH",
+  "ContentHubMetadataTableNameDev=zoolanding-content-hub-dev-ContentHubMetadataTable-9AIQ90DOPXNH",
+  "ContentHubMetadataTableNameTest=zoolanding-content-hub-test-ContentHubMetadataTable-ZV7P652CS11F",
+  "ContentHubMetadataTableNameProd=zoolanding-content-hub-prod-ContentHubMetadataTable-IQ1WMU24XMPB",
+  "ContentHubPackagesBucketName=zoolanding-content-hub-de-contenthubpackagesbucket-wbbdbckwpzcd",
+  "ContentHubPackagesBucketNameDev=zoolanding-content-hub-de-contenthubpackagesbucket-wbbdbckwpzcd",
+  "ContentHubPackagesBucketNameTest=zoolanding-content-hub-te-contenthubpackagesbucket-gdgtasj0yb0o",
+  "ContentHubPackagesBucketNameProd=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
   "LogLevel=INFO"
 ]
 
@@ -38,6 +54,14 @@ parameter_overrides = [
   "EnvironmentName=test",
   "ConfigTableName=zoolanding-config-registry-test",
   "ConfigPayloadsBucketName=zoolanding-config-payloads-test",
+  "ContentHubMetadataTableName=zoolanding-content-hub-test-ContentHubMetadataTable-ZV7P652CS11F",
+  "ContentHubMetadataTableNameDev=zoolanding-content-hub-dev-ContentHubMetadataTable-9AIQ90DOPXNH",
+  "ContentHubMetadataTableNameTest=zoolanding-content-hub-test-ContentHubMetadataTable-ZV7P652CS11F",
+  "ContentHubMetadataTableNameProd=zoolanding-content-hub-prod-ContentHubMetadataTable-IQ1WMU24XMPB",
+  "ContentHubPackagesBucketName=zoolanding-content-hub-te-contenthubpackagesbucket-gdgtasj0yb0o",
+  "ContentHubPackagesBucketNameDev=zoolanding-content-hub-de-contenthubpackagesbucket-wbbdbckwpzcd",
+  "ContentHubPackagesBucketNameTest=zoolanding-content-hub-te-contenthubpackagesbucket-gdgtasj0yb0o",
+  "ContentHubPackagesBucketNameProd=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
   "LogLevel=INFO"
 ]
 
@@ -52,5 +76,13 @@ parameter_overrides = [
   "EnvironmentName=prod",
   "ConfigTableName=zoolanding-config-registry",
   "ConfigPayloadsBucketName=zoolanding-config-payloads",
+  "ContentHubMetadataTableName=zoolanding-content-hub-prod-ContentHubMetadataTable-IQ1WMU24XMPB",
+  "ContentHubMetadataTableNameDev=zoolanding-content-hub-dev-ContentHubMetadataTable-9AIQ90DOPXNH",
+  "ContentHubMetadataTableNameTest=zoolanding-content-hub-test-ContentHubMetadataTable-ZV7P652CS11F",
+  "ContentHubMetadataTableNameProd=zoolanding-content-hub-prod-ContentHubMetadataTable-IQ1WMU24XMPB",
+  "ContentHubPackagesBucketName=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
+  "ContentHubPackagesBucketNameDev=zoolanding-content-hub-de-contenthubpackagesbucket-wbbdbckwpzcd",
+  "ContentHubPackagesBucketNameTest=zoolanding-content-hub-te-contenthubpackagesbucket-gdgtasj0yb0o",
+  "ContentHubPackagesBucketNameProd=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
   "LogLevel=INFO"
 ]
