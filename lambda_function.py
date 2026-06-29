@@ -319,6 +319,14 @@ def _content_hub_locale(hub: Dict[str, Any], lang: str) -> str:
     return _safe_content_hub_id(str(hub.get("defaultLocale") or hub.get("defaultLanguage") or "es").lower()) or "es"
 
 
+def _site_default_language(site_config: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(site_config, dict):
+        return ""
+    site = site_config.get("site")
+    i18n = site.get("i18n") if isinstance(site, dict) else None
+    return _safe_content_hub_id(str((i18n or {}).get("defaultLanguage") or "").lower()) if isinstance(i18n, dict) else ""
+
+
 def _content_hub_taxonomy_slug(value: Any) -> str:
     if isinstance(value, str):
         return _safe_content_hub_id(value)
@@ -1354,7 +1362,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     requested_domain = _resolve_domain(event)
     requested_environment = _requested_environment_override(event)
     path = _resolve_path(event)
-    lang = get_query_value(event, "lang") or "en"
+    requested_lang = get_query_value(event, "lang")
+    lang = requested_lang or "en"
 
     if not requested_domain:
         return bad_request("Missing domain. Provide query parameter 'domain' or a host header.")
@@ -1400,6 +1409,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return not_found("Published configuration prefix is missing", domain=domain)
 
         site_config = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/site-config.json")
+        lang = requested_lang or _site_default_language(site_config) or "en"
         site_config = _merge_content_hub_runtime_indexes(site_config, lang, environment)
         if not site_config:
             return _canonical_not_found_response(

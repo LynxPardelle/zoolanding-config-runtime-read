@@ -12,7 +12,9 @@ def parse(response):
 
 
 def event(host, path="/", lang="es", **query):
-    query_params = {"path": path, "lang": lang}
+    query_params = {"path": path}
+    if lang is not None:
+        query_params["lang"] = lang
     query_params.update({key: value for key, value in query.items() if value is not None})
     return {
         "headers": {"host": host},
@@ -451,6 +453,123 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["pageConfig"]["seo"]["description"], "Descripcion desde bundle")
         self.assertEqual(body["pageConfig"]["seo"]["canonical"], "https://pamelabetancourt.com/blog/web/qa-e2e")
         self.assertNotIn("publishedBundleKey", serialized)
+
+    def test_missing_lang_uses_site_default_language_for_content_hub_article_bundle(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
+        self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {"i18n": {"defaultLanguage": "es"}}
+        site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        site_config["runtime"] = {
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "routeBasePath": "/blog",
+                    "articlePathPattern": "/blog/:categorySlug/:articleSlug",
+                    "defaultLocale": "es",
+                    "locales": ["es", "en"],
+                    "publicArticles": [],
+                }
+            ]
+        }
+        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json"
+        self.content_hub_items = [
+            {
+                "tableName": "content-hub-metadata-test",
+                "pk": "HUB#main",
+                "sk": "ARTICLE#art_public",
+                "articleId": "art_public",
+                "status": "published",
+                "visibility": "public",
+                "primaryLocale": "es",
+                "title": "QA E2E",
+                "summary": "Resumen publico",
+                "path": "/blog/web/qa-e2e",
+                "category": {"taxonomyId": "web"},
+                "tags": [{"taxonomyId": "qa"}],
+                "publishedAt": "2026-06-27T22:48:09Z",
+                "publishedBundleKey": bundle_key,
+            }
+        ]
+        self.package_payloads[bundle_key] = {
+            "version": 1,
+            "kind": "content-hub-published-bundle",
+            "articleId": "art_public",
+            "path": "/blog/web/qa-e2e",
+            "status": "published",
+            "components": [{"id": "articleBody", "type": "text", "config": {"text": "Cuerpo real publicado"}}],
+            "variables": {"articleBody": {"html": "<p>Cuerpo real publicado</p>"}},
+        }
+
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", lang=None, domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["lang"], "es")
+        self.assertIn(bundle_key, self.loaded_keys)
+        self.assertEqual(body["pageId"], "blog-article")
+        self.assertEqual(body["variables"]["variables"]["contentHub"]["currentArticle"]["articleId"], "art_public")
+        self.assertEqual(body["components"]["components"][-1]["id"], "articleBody")
+
+    def test_explicit_lang_does_not_fall_back_to_site_default_for_content_hub_article_bundle(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
+        self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {"i18n": {"defaultLanguage": "es"}}
+        site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        site_config["runtime"] = {
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "routeBasePath": "/blog",
+                    "articlePathPattern": "/blog/:categorySlug/:articleSlug",
+                    "defaultLocale": "es",
+                    "locales": ["es", "en"],
+                    "publicArticles": [],
+                }
+            ]
+        }
+        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json"
+        self.content_hub_items = [
+            {
+                "tableName": "content-hub-metadata-test",
+                "pk": "HUB#main",
+                "sk": "ARTICLE#art_public",
+                "articleId": "art_public",
+                "status": "published",
+                "visibility": "public",
+                "primaryLocale": "es",
+                "title": "QA E2E",
+                "path": "/blog/web/qa-e2e",
+                "publishedAt": "2026-06-27T22:48:09Z",
+                "publishedBundleKey": bundle_key,
+            }
+        ]
+        self.package_payloads[bundle_key] = {
+            "articleId": "art_public",
+            "path": "/blog/web/qa-e2e",
+            "status": "published",
+            "components": [{"id": "articleBody", "type": "text"}],
+        }
+
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", lang="en", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["lang"], "en")
+        self.assertEqual(body["pageId"], "not-found")
+        self.assertEqual(body["metadata"]["statusCode"], 404)
+        self.assertNotIn(bundle_key, self.loaded_keys)
 
     def test_runtime_bundle_uses_slug_pointer_bundle_key_for_legacy_published_articles(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
