@@ -441,6 +441,25 @@ def _query_content_hub_metadata(hub_id: str, sk_prefix: str, environment: str) -
     return items if isinstance(items, list) else []
 
 
+def _load_content_hub_slug_pointer(
+    *,
+    environment: str,
+    render_domain: str,
+    locale: str,
+    path: str,
+) -> Optional[Dict[str, Any]]:
+    table_name = _content_hub_table_name(environment)
+    safe_path = _safe_content_hub_path(path)
+    if not table_name or not safe_path:
+        return None
+    item = load_item(
+        table_name,
+        f"SLUG#{_content_hub_environment_segment(environment)}#{render_domain}#{locale}",
+        f"PATH#{safe_path}",
+    )
+    return item if isinstance(item, dict) else None
+
+
 def _load_content_hub_json_bundle(
     key: str,
     environment: str,
@@ -522,8 +541,15 @@ def _content_hub_bundle_for_path(
             if not article or _safe_content_hub_path(article.get("path")) != normalized_path:
                 continue
             article_id = _safe_content_hub_id(article.get("articleId"))
+            slug_pointer = _load_content_hub_slug_pointer(
+                environment=environment,
+                render_domain=render_domain,
+                locale=locale,
+                path=normalized_path,
+            )
+            slug_article_id = _safe_content_hub_id((slug_pointer or {}).get("articleId"))
             bundle = _load_content_hub_json_bundle(
-                str(item.get("publishedBundleKey") or ""),
+                str(item.get("publishedBundleKey") or ((slug_pointer or {}).get("publishedBundleKey") if slug_article_id == article_id else "")),
                 environment,
                 hub_id,
                 render_domain,
