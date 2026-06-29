@@ -437,17 +437,27 @@ def _query_content_hub_metadata(hub_id: str, sk_prefix: str, environment: str) -
     table_name = _content_hub_table_name(environment)
     if not table_name:
         return []
+    items: list[Dict[str, Any]] = []
+    exclusive_start_key: Optional[Dict[str, Any]] = None
     try:
-        response = get_table(table_name).query(
-            KeyConditionExpression="pk = :pk AND begins_with(sk, :sk)",
-            ExpressionAttributeValues={":pk": f"HUB#{hub_id}", ":sk": sk_prefix},
-            Limit=200,
-        )
+        while True:
+            request: Dict[str, Any] = {
+                "KeyConditionExpression": "pk = :pk AND begins_with(sk, :sk)",
+                "ExpressionAttributeValues": {":pk": f"HUB#{hub_id}", ":sk": sk_prefix},
+                "Limit": 200,
+            }
+            if exclusive_start_key:
+                request["ExclusiveStartKey"] = exclusive_start_key
+            response = get_table(table_name).query(**request)
+            page_items = response.get("Items")
+            if isinstance(page_items, list):
+                items.extend(page_items)
+            exclusive_start_key = response.get("LastEvaluatedKey")
+            if not isinstance(exclusive_start_key, dict) or not exclusive_start_key:
+                return items
     except Exception as exc:
         log("WARNING", "Content hub public index query failed", hubId=hub_id, skPrefix=sk_prefix, error=str(exc))
         return []
-    items = response.get("Items")
-    return items if isinstance(items, list) else []
 
 
 def _load_content_hub_slug_pointer(

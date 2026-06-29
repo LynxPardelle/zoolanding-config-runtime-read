@@ -119,19 +119,24 @@ class RuntimeHandlerTest(unittest.TestCase):
                 self.owner = owner
                 self.table_name = table_name
 
-            def query(self, KeyConditionExpression=None, ExpressionAttributeValues=None, Limit=None):
-                del KeyConditionExpression, Limit
+            def query(self, KeyConditionExpression=None, ExpressionAttributeValues=None, Limit=None, ExclusiveStartKey=None):
+                del KeyConditionExpression
                 expression_values = ExpressionAttributeValues or {}
                 pk = expression_values.get(":pk")
                 sk_prefix = expression_values.get(":sk")
-                return {
-                    "Items": [
-                        dict(item)
-                        for item in self.owner.content_hub_items
-                        if item.get("pk") == pk and str(item.get("sk") or "").startswith(str(sk_prefix or ""))
-                        and str(item.get("tableName") or self.table_name) == self.table_name
-                    ]
-                }
+                matches = [
+                    dict(item)
+                    for item in self.owner.content_hub_items
+                    if item.get("pk") == pk and str(item.get("sk") or "").startswith(str(sk_prefix or ""))
+                    and str(item.get("tableName") or self.table_name) == self.table_name
+                ]
+                start = int((ExclusiveStartKey or {}).get("index", 0))
+                page_size = int(Limit or len(matches) or 1)
+                page = matches[start:start + page_size]
+                response = {"Items": page}
+                if start + page_size < len(matches):
+                    response["LastEvaluatedKey"] = {"index": start + page_size}
+                return response
 
         def get_table(table_name):
             if table_name in {"content-hub-metadata", "content-hub-metadata-dev", "content-hub-metadata-test", "content-hub-metadata-prod"}:
@@ -934,6 +939,51 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(articles[0]["articleId"], "art_test")
         self.assertIn("Test Article", serialized)
         self.assertNotIn("Prod Article", serialized)
+
+    def test_runtime_bundle_reads_all_paginated_content_hub_metadata(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata-test"
+        self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article page")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        site_config["runtime"] = {
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "routeBasePath": "/blog",
+                    "defaultLocale": "es",
+                    "locales": ["es"],
+                    "publicArticles": [],
+                }
+            ]
+        }
+        self.content_hub_items = [
+            {
+                "tableName": "content-hub-metadata-test",
+                "pk": "HUB#main",
+                "sk": f"ARTICLE#art_{index:03d}",
+                "articleId": f"art_{index:03d}",
+                "status": "published",
+                "visibility": "public",
+                "primaryLocale": "es",
+                "title": f"Article {index}",
+                "path": f"/blog/web/article-{index}",
+                "publishedAt": "2026-06-27T22:48:10Z",
+            }
+            for index in range(201)
+        ]
+
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/web/article-200", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+        articles = body["siteConfig"]["runtime"]["contentHubs"][0]["publicArticles"]
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["pageId"], "blog-article")
+        self.assertEqual(body["variables"]["variables"]["contentHub"]["currentArticle"]["articleId"], "art_200")
+        self.assertEqual(len(articles), 201)
 
     def test_unknown_route_uses_configured_not_found_page_id(self):
         response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())
