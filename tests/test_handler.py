@@ -378,6 +378,53 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertTrue(any(item["slug"] == "web" for item in categories))
         self.assertTrue(any(item["slug"] == "qa" for item in tags))
 
+    def test_runtime_bundle_treats_missing_article_visibility_as_public(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article page")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        site_config["runtime"] = {
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "routeBasePath": "/blog",
+                    "articlePathPattern": "/blog/:categorySlug/:articleSlug",
+                    "defaultLocale": "es",
+                    "locales": ["es"],
+                    "publicArticles": [],
+                }
+            ]
+        }
+        self.content_hub_items = [
+            {
+                "tableName": "content-hub-metadata-test",
+                "pk": "HUB#main",
+                "sk": "ARTICLE#art_public",
+                "articleId": "art_public",
+                "status": "published",
+                "primaryLocale": "es",
+                "title": "QA Sin visibility",
+                "summary": "Resumen publico sin campo visibility",
+                "path": "/blog/web/sin-visibility",
+                "category": {"taxonomyId": "web"},
+                "tags": [{"taxonomyId": "qa"}],
+                "publishedAt": "2026-06-27T22:48:09Z",
+            },
+        ]
+
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/web/sin-visibility", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["pageId"], "blog-article")
+        self.assertEqual(body["metadata"]["statusCode"], 200)
+        self.assertFalse(body["metadata"]["notFound"])
+        self.assertEqual(body["variables"]["variables"]["contentHub"]["currentArticle"]["articleId"], "art_public")
+
     def test_runtime_bundle_merges_published_content_hub_article_bundle(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
@@ -640,7 +687,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["variables"]["variables"]["legacyArticleBody"]["html"], "<p>Legacy bundle body</p>")
         self.assertNotIn("publishedBundleKey", serialized)
 
-    def test_runtime_bundle_rejects_slug_pointer_for_different_article(self):
+    def test_runtime_bundle_ignores_slug_pointer_for_different_article(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
@@ -695,8 +742,9 @@ class RuntimeHandlerTest(unittest.TestCase):
         )
         body = parse(response)
 
-        self.assertEqual(body["pageId"], "not-found")
-        self.assertEqual(body["metadata"]["statusCode"], 404)
+        self.assertEqual(body["pageId"], "blog-article")
+        self.assertEqual(body["metadata"]["statusCode"], 200)
+        self.assertEqual(body["variables"]["variables"]["contentHub"]["currentArticle"]["articleId"], "art_public")
         self.assertNotIn(bundle_key, self.loaded_keys)
 
     def test_missing_content_hub_article_path_renders_configured_404(self):
@@ -730,7 +778,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertTrue(body["metadata"]["notFound"])
         self.assertNotIn("Article shell", response["body"])
 
-    def test_content_hub_article_with_missing_bundle_renders_404(self):
+    def test_content_hub_article_with_missing_bundle_uses_article_shell(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
@@ -771,11 +819,13 @@ class RuntimeHandlerTest(unittest.TestCase):
         )
         body = parse(response)
 
-        self.assertEqual(body["pageId"], "not-found")
-        self.assertEqual(body["metadata"]["statusCode"], 404)
-        self.assertNotIn("Article shell", response["body"])
+        self.assertEqual(body["pageId"], "blog-article")
+        self.assertEqual(body["metadata"]["statusCode"], 200)
+        self.assertFalse(body["metadata"]["notFound"])
+        self.assertIn("Article shell", response["body"])
+        self.assertEqual(body["variables"]["variables"]["contentHub"]["currentArticle"]["articleId"], "art_public")
 
-    def test_content_hub_bundle_key_must_match_article_context(self):
+    def test_content_hub_bundle_key_must_match_article_context_before_merging(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
@@ -823,7 +873,9 @@ class RuntimeHandlerTest(unittest.TestCase):
         )
         body = parse(response)
 
-        self.assertEqual(body["metadata"]["statusCode"], 404)
+        self.assertEqual(body["pageId"], "blog-article")
+        self.assertEqual(body["metadata"]["statusCode"], 200)
+        self.assertEqual(body["variables"]["variables"]["contentHub"]["currentArticle"]["articleId"], "art_public")
         self.assertNotIn(foreign_key, self.loaded_keys)
         self.assertNotIn("No debe renderizar", response["body"])
 

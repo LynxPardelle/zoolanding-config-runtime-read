@@ -355,7 +355,8 @@ def _content_hub_tags(value: Any) -> list[str]:
 def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], locale: str) -> Optional[Dict[str, Any]]:
     if str(item.get("status") or "").strip() != "published":
         return None
-    if str(item.get("visibility") or "").strip() != "public":
+    visibility = str(item.get("visibility") or "").strip()
+    if visibility and visibility != "public":
         return None
 
     item_locale = _safe_content_hub_id(str(item.get("primaryLocale") or locale).lower())
@@ -702,6 +703,12 @@ def _content_hub_public_variables(site_config: Optional[Dict[str, Any]], path: s
         "articleCount": len(articles),
         "currentArticle": current_article or {},
     }
+
+
+def _content_hub_public_article_exists(site_config: Optional[Dict[str, Any]], path: str) -> bool:
+    content_hub = _content_hub_public_variables(site_config, path)
+    article = content_hub.get("currentArticle") if isinstance(content_hub, dict) else None
+    return isinstance(article, dict) and bool(article.get("articleId"))
 
 
 def _route_pattern_matches(pattern: Any, path: str) -> bool:
@@ -1434,11 +1441,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             route = _resolve_route(metadata, site_config, "/404")
 
         if not should_render_not_found and _is_content_hub_article_path(site_config, path):
-            article_bundle = _content_hub_bundle_for_path(site_config, path, lang, environment)
-            if not article_bundle:
+            if not _content_hub_public_article_exists(site_config, path):
                 page_id = _resolve_not_found_page_id(metadata, site_config)
                 should_render_not_found = True
                 route = _resolve_route(metadata, site_config, "/404")
+            else:
+                article_bundle = _content_hub_bundle_for_path(site_config, path, lang, environment)
 
         if should_render_not_found and not page_id:
             return _canonical_not_found_response(
