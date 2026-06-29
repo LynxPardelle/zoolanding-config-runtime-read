@@ -170,6 +170,7 @@ Resources:
                 - HasContentHubMetadataTable
                 - Effect: Allow
                   Action:
+                    - dynamodb:GetItem
                     - dynamodb:Query
                   Resource:
                     Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableName}
@@ -178,6 +179,7 @@ Resources:
                 - HasContentHubMetadataTableDev
                 - Effect: Allow
                   Action:
+                    - dynamodb:GetItem
                     - dynamodb:Query
                   Resource:
                     Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableNameDev}
@@ -186,6 +188,7 @@ Resources:
                 - HasContentHubMetadataTableTest
                 - Effect: Allow
                   Action:
+                    - dynamodb:GetItem
                     - dynamodb:Query
                   Resource:
                     Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableNameTest}
@@ -194,6 +197,7 @@ Resources:
                 - HasContentHubMetadataTableProd
                 - Effect: Allow
                   Action:
+                    - dynamodb:GetItem
                     - dynamodb:Query
                   Resource:
                     Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableNameProd}
