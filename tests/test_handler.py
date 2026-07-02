@@ -324,6 +324,13 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "publishedAt": "2026-06-27T22:48:09Z",
                 "updatedAt": "2026-06-27T22:48:10Z",
                 "authorLabel": "Equipo editorial",
+                "commentPolicy": "authenticated",
+                "contentSafety": {"rating": "sensitive", "warnings": ["sanitizado"]},
+                "interactions": {
+                    "reactions": {"enabled": True, "moderation": "spam-check"},
+                    "ctas": {"enabled": True, "moderation": "spam-check"},
+                    "forms": {"enabled": False, "moderation": "queue"},
+                },
                 "publishedBundleKey": "must-not-render",
                 "updatedBy": "must-not-render",
             },
@@ -373,6 +380,10 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["variables"]["variables"]["contentHub"]["hubId"], "main")
         self.assertEqual(current_article["articleId"], "art_public")
         self.assertEqual(current_article["summary"], "Resumen publico")
+        self.assertEqual(current_article["commentPolicy"], "authenticated")
+        self.assertEqual(current_article["contentSafety"], {"rating": "sensitive", "warnings": ["sanitizado"]})
+        self.assertEqual(current_article["interactions"]["forms"], {"enabled": False, "moderation": "queue"})
+        self.assertNotIn("bodyHash", serialized)
         seo = body["pageConfig"]["seo"]
         self.assertEqual(seo["title"], "QA E2E | pamelabetancourt.com")
         self.assertEqual(seo["description"], "Resumen publico")
