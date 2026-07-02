@@ -352,6 +352,91 @@ def _content_hub_tags(value: Any) -> list[str]:
     return tags[:20]
 
 
+def _content_hub_comment_policy(value: Any) -> str:
+    raw_value = value
+    if isinstance(value, dict):
+        mode = str(value.get("mode") or "").strip().lower()
+        moderation = str(value.get("moderation") or "").strip().lower()
+        if mode in {"off", "disabled"}:
+            raw_value = "disabled"
+        elif mode == "authenticated":
+            raw_value = "authenticated"
+        elif moderation:
+            raw_value = "moderated"
+    raw = str(raw_value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "off": "disabled",
+        "disabled": "disabled",
+        "desactivados": "disabled",
+        "public-moderated": "moderated",
+        "publicos-moderacion": "moderated",
+        "moderation": "moderated",
+        "moderacion": "moderated",
+        "authenticated-moderation": "authenticated",
+        "authenticated-moderated": "authenticated",
+        "auth-moderated": "authenticated",
+        "autenticados-moderacion": "authenticated",
+        "authenticated": "authenticated",
+        "moderated": "moderated",
+    }
+    return aliases.get(raw, "moderated")
+
+
+def _content_hub_interaction_policy(value: Any, default_moderation: str) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        enabled = value.get("enabled")
+        moderation = str(value.get("moderation") or default_moderation).strip()
+    else:
+        enabled = None
+        moderation = default_moderation
+    if moderation not in {"queue", "spam-check", "manual"}:
+        moderation = default_moderation
+    return {
+        "enabled": bool(enabled) if isinstance(enabled, bool) else True,
+        "moderation": moderation,
+    }
+
+
+def _content_hub_interaction_policies(value: Any) -> Dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "reactions": _content_hub_interaction_policy(source.get("reactions"), "spam-check"),
+        "ctas": _content_hub_interaction_policy(source.get("ctas"), "spam-check"),
+        "forms": _content_hub_interaction_policy(source.get("forms"), "queue"),
+    }
+
+
+def _content_hub_content_safety(value: Any) -> Dict[str, Any]:
+    if isinstance(value, str):
+        aliases = {
+            "trusted-authors": "general",
+            "autores-confiables": "general",
+            "advanced-freeform": "sensitive",
+            "avanzado-libre": "sensitive",
+            "strict": "restricted",
+            "estricto": "restricted",
+            "general": "general",
+            "sensitive": "sensitive",
+            "restricted": "restricted",
+        }
+        rating = aliases.get(_safe_content_hub_id(value), "general")
+        return {"rating": rating, "warnings": []}
+    if isinstance(value, dict):
+        rating = _safe_content_hub_id(value.get("rating") or value.get("audience") or value.get("htmlFreedom") or "general")
+        if rating not in {"general", "sensitive", "restricted"}:
+            rating = "general"
+        warnings = []
+        raw_warnings = value.get("warnings")
+        if isinstance(raw_warnings, list):
+            warnings = [
+                warning
+                for warning in (_safe_content_hub_text(entry, 80) for entry in raw_warnings[:10])
+                if warning
+            ]
+        return {"rating": rating, "warnings": warnings}
+    return {"rating": "general", "warnings": []}
+
+
 def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], locale: str) -> Optional[Dict[str, Any]]:
     if str(item.get("status") or "").strip() != "published":
         return None
@@ -403,6 +488,9 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
         summary["canonicalPath"] = canonical_path
     elif path:
         summary["canonicalPath"] = path
+    summary["commentPolicy"] = _content_hub_comment_policy(item.get("commentPolicy"))
+    summary["contentSafety"] = _content_hub_content_safety(item.get("contentSafety"))
+    summary["interactions"] = _content_hub_interaction_policies(item.get("interactions") or item.get("interactionPolicies"))
     return summary
 
 
