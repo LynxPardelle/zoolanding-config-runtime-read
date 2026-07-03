@@ -809,6 +809,80 @@ def _content_hub_public_article_exists(site_config: Optional[Dict[str, Any]], pa
     return isinstance(article, dict) and bool(article.get("articleId"))
 
 
+def _content_hub_collection_items(collection: Any) -> list[Dict[str, Any]]:
+    if isinstance(collection, list):
+        return [item for item in collection if isinstance(item, dict)]
+    if isinstance(collection, dict) and isinstance(collection.get("items"), list):
+        return [item for item in collection["items"] if isinstance(item, dict)]
+    return []
+
+
+def _content_hub_base_path(hub: Dict[str, Any]) -> str:
+    configured = normalize_route_path(hub.get("routeBasePath") or "")
+    if configured != "/":
+        return configured
+
+    pattern = normalize_route_path(hub.get("articlePathPattern") or "")
+    static_segments: list[str] = []
+    for segment in [segment for segment in pattern.split("/") if segment]:
+        if segment.startswith(":"):
+            break
+        static_segments.append(segment)
+    return f"/{'/'.join(static_segments)}" if static_segments else ""
+
+
+def _content_hub_taxonomy_route(site_config: Optional[Dict[str, Any]], path: str) -> Optional[Dict[str, Any]]:
+    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
+    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
+    if not isinstance(hubs, list):
+        return None
+
+    normalized_path = normalize_route_path(path)
+    for hub in hubs:
+        if not isinstance(hub, dict):
+            continue
+        base_path = _content_hub_base_path(hub)
+        if not base_path or normalized_path == base_path or not normalized_path.startswith(f"{base_path}/"):
+            continue
+        segments = [segment for segment in normalized_path[len(base_path) + 1:].split("/") if segment]
+        if len(segments) == 1:
+            return {"hub": hub, "kind": "category", "slug": _safe_content_hub_id(segments[0]), "path": normalized_path}
+        if len(segments) == 2 and segments[0] == "tag":
+            return {"hub": hub, "kind": "tag", "slug": _safe_content_hub_id(segments[1]), "path": normalized_path}
+    return None
+
+
+def _content_hub_public_taxonomy_exists(site_config: Optional[Dict[str, Any]], path: str) -> bool:
+    route = _content_hub_taxonomy_route(site_config, path)
+    if not route:
+        return False
+
+    hub = route["hub"]
+    kind = route["kind"]
+    slug = route["slug"]
+    normalized_path = route["path"]
+    for item in _content_hub_collection_items(hub.get("publicTaxonomy")):
+        if item.get("visible") is False:
+            continue
+        item_kind = str(item.get("kind") or "").strip()
+        if item_kind != kind:
+            continue
+        if _safe_content_hub_id(item.get("slug")) == slug or normalize_route_path(item.get("path") or "") == normalized_path:
+            return True
+
+    for item in _content_hub_collection_items(hub.get("publicArticles")):
+        if str(item.get("status") or "").strip() != "published":
+            continue
+        visibility = str(item.get("visibility") or "").strip()
+        if visibility and visibility != "public":
+            continue
+        if kind == "category" and _safe_content_hub_id(item.get("categorySlug")) == slug:
+            return True
+        if kind == "tag" and any(_safe_content_hub_id(tag) == slug for tag in item.get("tags") or []):
+            return True
+    return False
+
+
 def _route_pattern_matches(pattern: Any, path: str) -> bool:
     route_path = normalize_route_path(pattern or "")
     normalized_path = normalize_route_path(path)
@@ -829,6 +903,9 @@ def _is_content_hub_article_path(site_config: Optional[Dict[str, Any]], path: st
         return False
     for hub in hubs:
         if not isinstance(hub, dict):
+            continue
+        base_path = _content_hub_base_path(hub)
+        if base_path and normalize_route_path(path).startswith(f"{base_path}/tag/"):
             continue
         pattern = hub.get("articlePathPattern")
         if pattern and _route_pattern_matches(pattern, path):
@@ -1545,6 +1622,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 route = _resolve_route(metadata, site_config, "/404")
             else:
                 article_bundle = _content_hub_bundle_for_path(site_config, path, lang, environment)
+
+        if not should_render_not_found and _content_hub_taxonomy_route(site_config, path):
+            if not _content_hub_public_taxonomy_exists(site_config, path):
+                page_id = _resolve_not_found_page_id(metadata, site_config)
+                should_render_not_found = True
+                route = _resolve_route(metadata, site_config, "/404")
 
         if should_render_not_found and not page_id:
             return _canonical_not_found_response(

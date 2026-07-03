@@ -794,6 +794,55 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertTrue(body["metadata"]["notFound"])
         self.assertNotIn("Article shell", response["body"])
 
+    def test_missing_content_hub_taxonomy_paths_render_configured_404(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        self.metadata["routes"].extend([
+            {"path": "/blog/:categorySlug", "pageId": "blog-category"},
+            {"path": "/blog/tag/:tagSlug", "pageId": "blog-tag"},
+        ])
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-category", "Category shell")
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-tag", "Tag shell")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["routes"].extend([
+            {"path": "/blog/:categorySlug", "pageId": "blog-category"},
+            {"path": "/blog/tag/:tagSlug", "pageId": "blog-tag"},
+        ])
+        site_config["runtime"] = {
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "routeBasePath": "/blog",
+                    "articlePathPattern": "/blog/:categorySlug/:articleSlug",
+                    "defaultLocale": "es",
+                    "locales": ["es"],
+                    "publicArticles": [],
+                    "publicTaxonomy": [],
+                }
+            ]
+        }
+
+        category_response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/bienvenido-al-blog-de-zoosite", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        tag_response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/tag/no-existe", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        category_body = parse(category_response)
+        tag_body = parse(tag_response)
+
+        self.assertEqual(category_response["statusCode"], 200)
+        self.assertEqual(category_body["pageId"], "not-found")
+        self.assertEqual(category_body["metadata"]["statusCode"], 404)
+        self.assertTrue(category_body["metadata"]["notFound"])
+        self.assertNotIn("Category shell", category_response["body"])
+        self.assertEqual(tag_response["statusCode"], 200)
+        self.assertEqual(tag_body["pageId"], "not-found")
+        self.assertEqual(tag_body["metadata"]["statusCode"], 404)
+        self.assertTrue(tag_body["metadata"]["notFound"])
+        self.assertNotIn("Tag shell", tag_response["body"])
+
     def test_content_hub_article_with_missing_bundle_uses_article_shell(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
