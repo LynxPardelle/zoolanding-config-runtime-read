@@ -280,7 +280,24 @@ def _safe_content_hub_text(value: Any, max_length: int) -> str:
     text = str(value or "").strip()
     if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
         return ""
-    return text[:max_length]
+    return _repair_mojibake_text(text)[:max_length]
+
+
+def _repair_mojibake_text(text: str) -> str:
+    if not any(marker in text for marker in ("Ã", "Â", "â")):
+        return text
+    for encoding in ("latin-1", "cp1252"):
+        try:
+            repaired = text.encode(encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if _mojibake_score(repaired) < _mojibake_score(text):
+            return repaired
+    return text
+
+
+def _mojibake_score(text: str) -> int:
+    return sum(text.count(marker) for marker in ("Ã", "Â", "â"))
 
 
 def _public_content_hub_payload(value: Any) -> Any:
@@ -308,6 +325,28 @@ def _public_content_hub_payload(value: Any) -> Any:
 def _safe_content_hub_timestamp(value: Any) -> str:
     text = str(value or "").strip()
     return text if text and re.fullmatch(r"\d{4}-\d{2}-\d{2}T[0-9:.+-]+Z?", text) else ""
+
+
+def _content_hub_article_localization(item: Dict[str, Any], locale: str) -> Optional[Dict[str, Any]]:
+    localizations = item.get("localizations")
+    if not isinstance(localizations, dict):
+        return None
+    for key, value in localizations.items():
+        if _safe_content_hub_id(str(key).lower()) == locale and isinstance(value, dict):
+            return value
+    return None
+
+
+def _content_hub_article_content(value: Any) -> Optional[Any]:
+    if isinstance(value, str):
+        return _safe_content_hub_text(value, 50000)
+    if not isinstance(value, dict):
+        return None
+    html = value.get("html")
+    if not isinstance(html, str):
+        return None
+    sanitized_html = _safe_content_hub_text(html, 50000)
+    return {"html": sanitized_html} if sanitized_html else None
 
 
 def _content_hub_locale(hub: Dict[str, Any], lang: str) -> str:
@@ -445,35 +484,38 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
         return None
 
     item_locale = _safe_content_hub_id(str(item.get("primaryLocale") or locale).lower())
-    if item_locale and item_locale != locale:
+    localization = _content_hub_article_localization(item, locale)
+    if item_locale and item_locale != locale and not localization:
         return None
+    source = {**item, **(localization or {})}
 
     article_id = _safe_content_hub_id(item.get("articleId"))
-    title = _safe_content_hub_text(item.get("title"), 160)
-    path = _safe_content_hub_path(item.get("path"))
-    published_at = _safe_content_hub_timestamp(item.get("publishedAt") or item.get("updatedAt"))
+    title = _safe_content_hub_text(source.get("title"), 160)
+    path = _safe_content_hub_path(source.get("path"))
+    published_at = _safe_content_hub_timestamp(source.get("publishedAt") or item.get("publishedAt") or item.get("updatedAt"))
     if not article_id or not title or not path or not published_at:
         return None
 
-    category_slug = _content_hub_taxonomy_slug(item.get("category"))
-    tags = _content_hub_tags(item.get("tags"))
-    robots = str(item.get("robots") or "index,follow").strip()
+    category_slug = _content_hub_taxonomy_slug(source.get("category") or source.get("categorySlug"))
+    tags = _content_hub_tags(source.get("tags"))
+    robots = str(source.get("robots") or item.get("robots") or "index,follow").strip()
     if robots not in {"index,follow", "noindex,follow", "noindex,nofollow"}:
         robots = "index,follow"
 
     summary: Dict[str, Any] = {
         "articleId": article_id,
-        "locale": item_locale or locale,
+        "locale": locale if localization else item_locale or locale,
         "status": "published",
         "title": title,
         "path": path,
         "publishedAt": published_at,
         "robots": robots,
     }
-    description = _safe_content_hub_text(item.get("summary") or item.get("seoDescription"), 320)
-    updated_at = _safe_content_hub_timestamp(item.get("updatedAt"))
-    author_label = _safe_content_hub_text(item.get("authorLabel"), 120)
-    canonical_path = _safe_content_hub_path(item.get("canonicalPath") or item.get("canonicalUrl"))
+    description = _safe_content_hub_text(source.get("summary") or source.get("seoDescription"), 320)
+    updated_at = _safe_content_hub_timestamp(source.get("updatedAt") or item.get("updatedAt"))
+    author_label = _safe_content_hub_text(source.get("authorLabel") or item.get("authorLabel"), 120)
+    canonical_path = _safe_content_hub_path(source.get("canonicalPath") or source.get("canonicalUrl"))
+    article_content = _content_hub_article_content(source.get("articleContent"))
     if description:
         summary["summary"] = description
     if category_slug:
@@ -488,10 +530,32 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
         summary["canonicalPath"] = canonical_path
     elif path:
         summary["canonicalPath"] = path
+    if article_content:
+        summary["articleContent"] = article_content
     summary["commentPolicy"] = _content_hub_comment_policy(item.get("commentPolicy"))
     summary["contentSafety"] = _content_hub_content_safety(item.get("contentSafety"))
     summary["interactions"] = _content_hub_interaction_policies(item.get("interactions") or item.get("interactionPolicies"))
     return summary
+
+
+def _normalize_content_hub_public_article(article: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = copy.deepcopy(article)
+    for field, max_length in (("title", 160), ("summary", 320), ("authorLabel", 120)):
+        if field in normalized:
+            normalized[field] = _safe_content_hub_text(normalized.get(field), max_length)
+    localizations = normalized.get("localizations")
+    if isinstance(localizations, dict):
+        normalized_localizations: Dict[str, Any] = {}
+        for locale, localization in localizations.items():
+            if not isinstance(localization, dict):
+                continue
+            localized = copy.deepcopy(localization)
+            for field, max_length in (("title", 160), ("summary", 320), ("authorLabel", 120)):
+                if field in localized:
+                    localized[field] = _safe_content_hub_text(localized.get(field), max_length)
+            normalized_localizations[str(locale)] = localized
+        normalized["localizations"] = normalized_localizations
+    return normalized
 
 
 def _content_hub_taxonomy_summary(item: Dict[str, Any], default_kind: str, locale: str) -> Optional[Dict[str, Any]]:
@@ -733,7 +797,7 @@ def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], la
         existing_articles = hub.get("publicArticles") if isinstance(hub.get("publicArticles"), list) else []
         merged_articles = _dedupe_content_hub_items(
             sorted(dynamic_articles, key=lambda item: str(item.get("publishedAt") or ""), reverse=True)
-            + [item for item in existing_articles if isinstance(item, dict)],
+            + [_normalize_content_hub_public_article(item) for item in existing_articles if isinstance(item, dict)],
             ("articleId",),
         )
         if merged_articles:
