@@ -331,6 +331,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                     "ctas": {"enabled": True, "moderation": "spam-check"},
                     "forms": {"enabled": False, "moderation": "queue"},
                 },
+                "articleContent": {"html": "<h2>Contenido publico</h2>"},
                 "publishedBundleKey": "must-not-render",
                 "updatedBy": "must-not-render",
             },
@@ -380,6 +381,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["variables"]["variables"]["contentHub"]["hubId"], "main")
         self.assertEqual(current_article["articleId"], "art_public")
         self.assertEqual(current_article["summary"], "Resumen publico")
+        self.assertEqual(current_article["articleContent"], {"html": "<h2>Contenido publico</h2>"})
         self.assertEqual(current_article["commentPolicy"], "authenticated")
         self.assertEqual(current_article["contentSafety"], {"rating": "sensitive", "warnings": ["sanitizado"]})
         self.assertEqual(current_article["interactions"]["forms"], {"enabled": False, "moderation": "queue"})
@@ -393,6 +395,115 @@ class RuntimeHandlerTest(unittest.TestCase):
         tags = body["variables"]["variables"]["contentHub"]["tags"]["items"]
         self.assertTrue(any(item["slug"] == "web" for item in categories))
         self.assertTrue(any(item["slug"] == "qa" for item in tags))
+
+    def test_runtime_bundle_hydrates_localized_public_content_hub_article(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
+        self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article page")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        site_config["runtime"] = {
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "routeBasePath": "/blog",
+                    "articlePathPattern": "/blog/:categorySlug/:articleSlug",
+                    "defaultLocale": "es",
+                    "locales": ["es", "en"],
+                    "publicArticles": [],
+                }
+            ]
+        }
+        self.content_hub_items = [
+            {
+                "pk": "HUB#main",
+                "sk": "ARTICLE#art_public",
+                "articleId": "art_public",
+                "status": "published",
+                "visibility": "public",
+                "primaryLocale": "es",
+                "title": "Artículo ES",
+                "summary": "Resumen ES",
+                "path": "/blog/web/articulo-es",
+                "category": {"taxonomyId": "web"},
+                "tags": [{"taxonomyId": "seo"}],
+                "publishedAt": "2026-06-27T22:48:09Z",
+                "articleContent": {"html": "<h2>Contenido ES</h2>"},
+                "localizations": {
+                    "en": {
+                        "title": "English article",
+                        "summary": "English summary",
+                        "path": "/blog/web/english-article",
+                        "canonicalPath": "/blog/web/english-article",
+                        "categorySlug": "web",
+                        "tags": ["seo", "guides"],
+                        "articleContent": {"html": "<h2>English content</h2>"},
+                    }
+                },
+                "publishedBundleKey": "must-not-render",
+            }
+        ]
+
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/web/english-article", lang="en", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+        serialized = response["body"]
+
+        self.assertEqual(response["statusCode"], 200)
+        main_hub = next(hub for hub in body["siteConfig"]["runtime"]["contentHubs"] if hub["hubId"] == "main")
+        self.assertEqual(main_hub["publicArticles"][0]["locale"], "en")
+        self.assertEqual(main_hub["publicArticles"][0]["title"], "English article")
+        self.assertEqual(main_hub["publicArticles"][0]["path"], "/blog/web/english-article")
+        current_article = body["variables"]["variables"]["contentHub"]["currentArticle"]
+        self.assertEqual(current_article["articleId"], "art_public")
+        self.assertEqual(current_article["locale"], "en")
+        self.assertEqual(current_article["summary"], "English summary")
+        self.assertEqual(current_article["articleContent"], {"html": "<h2>English content</h2>"})
+        self.assertNotIn("publishedBundleKey", serialized)
+
+    def test_runtime_bundle_repairs_mojibake_from_published_site_config_articles(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
+        self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article page")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
+        site_config["runtime"] = {
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "routeBasePath": "/blog",
+                    "articlePathPattern": "/blog/:categorySlug/:articleSlug",
+                    "defaultLocale": "es",
+                    "locales": ["es"],
+                    "publicArticles": [
+                        {
+                            "articleId": "art_mojibake",
+                            "locale": "es",
+                            "status": "published",
+                            "title": "CÃ³mo crear artÃ­culos visuales",
+                            "summary": "GuÃ­a prÃ¡ctica para publicar con mediciÃ³n.",
+                            "path": "/blog/web/mojibake",
+                            "categorySlug": "web",
+                            "publishedAt": "2026-06-27T22:48:09Z",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog/web/mojibake", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+        article = body["variables"]["variables"]["contentHub"]["currentArticle"]
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(article["title"], "Cómo crear artículos visuales")
+        self.assertEqual(article["summary"], "Guía práctica para publicar con medición.")
+        self.assertNotIn("CÃ³mo", response["body"])
 
     def test_runtime_bundle_treats_missing_article_visibility_as_public(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
