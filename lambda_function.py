@@ -2,6 +2,7 @@ import copy
 import os
 import re
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 from zoolanding_lambda_common import (
     alias_pk,
@@ -349,6 +350,25 @@ def _content_hub_article_content(value: Any) -> Optional[Any]:
     return {"html": sanitized_html} if sanitized_html else None
 
 
+def _safe_content_hub_image_src(value: Any) -> str:
+    text = str(value or "").strip()
+    if (
+        not text
+        or len(text) > 2048
+        or "\\" in text
+        or re.search(r"[\s\x00-\x1f\x7f]", text)
+        or CONTENT_HUB_UNSAFE_VALUE_RE.search(text)
+    ):
+        return ""
+    if text.startswith("/") and not text.startswith("//"):
+        return text
+
+    parsed = urlparse(text)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return ""
+    return text
+
+
 def _content_hub_locale(hub: Dict[str, Any], lang: str) -> str:
     requested = _safe_content_hub_id(lang.lower())
     locales = hub.get("locales")
@@ -516,6 +536,19 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
     author_label = _safe_content_hub_text(source.get("authorLabel") or item.get("authorLabel"), 120)
     canonical_path = _safe_content_hub_path(source.get("canonicalPath") or source.get("canonicalUrl"))
     article_content = _content_hub_article_content(source.get("articleContent"))
+    image_src = _safe_content_hub_image_src(
+        source.get("imageSrc")
+        or source.get("coverImage")
+        or source.get("heroImage")
+        or source.get("heroImageUrl")
+    )
+    image_alt = _safe_content_hub_text(
+        source.get("imageAlt")
+        or source.get("coverImageAlt")
+        or source.get("heroImageAlt")
+        or title,
+        180,
+    )
     if description:
         summary["summary"] = description
     if category_slug:
@@ -532,6 +565,9 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
         summary["canonicalPath"] = path
     if article_content:
         summary["articleContent"] = article_content
+    if image_src:
+        summary["imageSrc"] = image_src
+        summary["imageAlt"] = image_alt or title
     summary["commentPolicy"] = _content_hub_comment_policy(item.get("commentPolicy"))
     summary["contentSafety"] = _content_hub_content_safety(item.get("contentSafety"))
     summary["interactions"] = _content_hub_interaction_policies(item.get("interactions") or item.get("interactionPolicies"))
@@ -543,6 +579,26 @@ def _normalize_content_hub_public_article(article: Dict[str, Any]) -> Dict[str, 
     for field, max_length in (("title", 160), ("summary", 320), ("authorLabel", 120)):
         if field in normalized:
             normalized[field] = _safe_content_hub_text(normalized.get(field), max_length)
+    image_src = _safe_content_hub_image_src(
+        normalized.get("imageSrc")
+        or normalized.get("coverImage")
+        or normalized.get("heroImage")
+        or normalized.get("heroImageUrl")
+    )
+    if image_src:
+        normalized["imageSrc"] = image_src
+        normalized["imageAlt"] = _safe_content_hub_text(
+            normalized.get("imageAlt")
+            or normalized.get("coverImageAlt")
+            or normalized.get("heroImageAlt")
+            or normalized.get("title"),
+            180,
+        )
+    else:
+        normalized.pop("imageSrc", None)
+        normalized.pop("imageAlt", None)
+    for alias_field in ("coverImage", "heroImage", "heroImageUrl", "coverImageAlt", "heroImageAlt"):
+        normalized.pop(alias_field, None)
     localizations = normalized.get("localizations")
     if isinstance(localizations, dict):
         normalized_localizations: Dict[str, Any] = {}
@@ -553,6 +609,26 @@ def _normalize_content_hub_public_article(article: Dict[str, Any]) -> Dict[str, 
             for field, max_length in (("title", 160), ("summary", 320), ("authorLabel", 120)):
                 if field in localized:
                     localized[field] = _safe_content_hub_text(localized.get(field), max_length)
+            localized_image_src = _safe_content_hub_image_src(
+                localized.get("imageSrc")
+                or localized.get("coverImage")
+                or localized.get("heroImage")
+                or localized.get("heroImageUrl")
+            )
+            if localized_image_src:
+                localized["imageSrc"] = localized_image_src
+                localized["imageAlt"] = _safe_content_hub_text(
+                    localized.get("imageAlt")
+                    or localized.get("coverImageAlt")
+                    or localized.get("heroImageAlt")
+                    or localized.get("title"),
+                    180,
+                )
+            else:
+                localized.pop("imageSrc", None)
+                localized.pop("imageAlt", None)
+            for alias_field in ("coverImage", "heroImage", "heroImageUrl", "coverImageAlt", "heroImageAlt"):
+                localized.pop(alias_field, None)
             normalized_localizations[str(locale)] = localized
         normalized["localizations"] = normalized_localizations
     return normalized
@@ -743,6 +819,25 @@ def _dedupe_content_hub_items(items: list[Dict[str, Any]], key_fields: tuple[str
     return output
 
 
+def _supplement_dynamic_public_article(
+    article: Dict[str, Any],
+    existing_articles_by_id: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    article_id = _safe_content_hub_id(article.get("articleId"))
+    existing = existing_articles_by_id.get(article_id)
+    if not existing:
+        return article
+
+    output = dict(article)
+    if not output.get("imageSrc") and existing.get("imageSrc"):
+        output["imageSrc"] = existing["imageSrc"]
+        image_alt = _safe_content_hub_text(existing.get("imageAlt") or output.get("title"), 180)
+        output["imageAlt"] = image_alt or output.get("title") or ""
+    elif output.get("imageSrc") and not output.get("imageAlt") and existing.get("imageAlt"):
+        output["imageAlt"] = existing["imageAlt"]
+    return output
+
+
 def _content_hub_taxonomy_from_articles(articles: list[Dict[str, Any]], locale: str) -> list[Dict[str, Any]]:
     taxonomy: list[Dict[str, Any]] = []
     for article in articles:
@@ -788,16 +883,27 @@ def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], la
         if not hub_id:
             continue
         locale = _content_hub_locale(hub, lang)
+        existing_articles = hub.get("publicArticles") if isinstance(hub.get("publicArticles"), list) else []
+        normalized_existing_articles = [
+            _normalize_content_hub_public_article(item)
+            for item in existing_articles
+            if isinstance(item, dict)
+        ]
+        existing_articles_by_id = {
+            article_id: item
+            for item in normalized_existing_articles
+            for article_id in [_safe_content_hub_id(item.get("articleId"))]
+            if article_id
+        }
         dynamic_articles = [
-            article
+            _supplement_dynamic_public_article(article, existing_articles_by_id)
             for item in _query_content_hub_metadata(hub_id, "ARTICLE#", environment)
             for article in [_content_hub_article_summary(item, hub, locale)]
             if article
         ]
-        existing_articles = hub.get("publicArticles") if isinstance(hub.get("publicArticles"), list) else []
         merged_articles = _dedupe_content_hub_items(
             sorted(dynamic_articles, key=lambda item: str(item.get("publishedAt") or ""), reverse=True)
-            + [_normalize_content_hub_public_article(item) for item in existing_articles if isinstance(item, dict)],
+            + normalized_existing_articles,
             ("articleId",),
         )
         if merged_articles:

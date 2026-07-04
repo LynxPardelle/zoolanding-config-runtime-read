@@ -321,6 +321,10 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "path": "/blog/web/qa-e2e",
                 "category": {"taxonomyId": "web"},
                 "tags": [{"taxonomyId": "qa"}, {"slug": "content-hub"}],
+                "imageSrc": "https://images.example.test/blog/qa-e2e.jpg?fit=cover",
+                "imageAlt": "Equipo editando un articulo visual",
+                "coverImage": "https://images.example.test/blog/old-cover.jpg",
+                "privateImageUrl": "https://example.test/private.jpg?X-Amz-Signature=must-not-render",
                 "publishedAt": "2026-06-27T22:48:09Z",
                 "updatedAt": "2026-06-27T22:48:10Z",
                 "authorLabel": "Equipo editorial",
@@ -372,8 +376,12 @@ class RuntimeHandlerTest(unittest.TestCase):
         articles = main_hub["publicArticles"]
         self.assertEqual(articles[0]["articleId"], "art_public")
         self.assertEqual(articles[0]["path"], "/blog/web/qa-e2e")
+        self.assertEqual(articles[0]["imageSrc"], "https://images.example.test/blog/qa-e2e.jpg?fit=cover")
+        self.assertEqual(articles[0]["imageAlt"], "Equipo editando un articulo visual")
         self.assertNotIn("publishedBundleKey", articles[0])
         self.assertNotIn("updatedBy", articles[0])
+        self.assertNotIn("coverImage", articles[0])
+        self.assertNotIn("privateImageUrl", serialized)
         self.assertNotIn("art_private", serialized)
         self.assertNotIn("art_draft", serialized)
         self.assertNotIn("must-not-render", serialized)
@@ -382,6 +390,8 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(current_article["articleId"], "art_public")
         self.assertEqual(current_article["summary"], "Resumen publico")
         self.assertEqual(current_article["articleContent"], {"html": "<h2>Contenido publico</h2>"})
+        self.assertEqual(current_article["imageSrc"], "https://images.example.test/blog/qa-e2e.jpg?fit=cover")
+        self.assertEqual(current_article["imageAlt"], "Equipo editando un articulo visual")
         self.assertEqual(current_article["commentPolicy"], "authenticated")
         self.assertEqual(current_article["contentSafety"], {"rating": "sensitive", "warnings": ["sanitizado"]})
         self.assertEqual(current_article["interactions"]["forms"], {"enabled": False, "moderation": "queue"})
@@ -395,6 +405,69 @@ class RuntimeHandlerTest(unittest.TestCase):
         tags = body["variables"]["variables"]["contentHub"]["tags"]["items"]
         self.assertTrue(any(item["slug"] == "web" for item in categories))
         self.assertTrue(any(item["slug"] == "qa" for item in tags))
+
+    def test_dynamic_content_hub_article_uses_safe_static_cover_fallback(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
+        self.metadata["routes"].append({"path": "/blog", "pageId": "blog"})
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog", "Blog")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["runtime"] = {
+            "contentHubs": [
+                {
+                    "hubId": "main",
+                    "routeBasePath": "/blog",
+                    "defaultLocale": "es",
+                    "locales": ["es"],
+                    "publicArticles": [
+                        {
+                            "articleId": "art_without_dynamic_image",
+                            "status": "published",
+                            "title": "Static title must not win",
+                            "summary": "Static summary must not win",
+                            "path": "/blog/web/static-path-must-not-win",
+                            "publishedAt": "2026-06-20T01:00:00Z",
+                            "imageSrc": "https://images.example.test/blog/static-cover.jpg",
+                            "imageAlt": "Static cover fallback",
+                            "heroImageUrl": "https://example.test/private.jpg?X-Amz-Signature=must-not-render",
+                        }
+                    ],
+                }
+            ]
+        }
+        self.content_hub_items = [
+            {
+                "pk": "HUB#main",
+                "sk": "ARTICLE#art_without_dynamic_image",
+                "articleId": "art_without_dynamic_image",
+                "status": "published",
+                "visibility": "public",
+                "primaryLocale": "es",
+                "title": "Dynamic title wins",
+                "summary": "Dynamic summary wins",
+                "path": "/blog/web/dynamic-path-wins",
+                "category": {"taxonomyId": "web"},
+                "tags": [{"taxonomyId": "qa"}],
+                "publishedAt": "2026-06-27T22:48:09Z",
+            },
+        ]
+
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", path="/blog", domain="pamelabetancourt.com", environment="test"),
+            Context(),
+        )
+        body = parse(response)
+        serialized = response["body"]
+
+        self.assertEqual(response["statusCode"], 200)
+        article = body["siteConfig"]["runtime"]["contentHubs"][0]["publicArticles"][0]
+        self.assertEqual(article["articleId"], "art_without_dynamic_image")
+        self.assertEqual(article["title"], "Dynamic title wins")
+        self.assertEqual(article["summary"], "Dynamic summary wins")
+        self.assertEqual(article["path"], "/blog/web/dynamic-path-wins")
+        self.assertEqual(article["imageSrc"], "https://images.example.test/blog/static-cover.jpg")
+        self.assertEqual(article["imageAlt"], "Static cover fallback")
+        self.assertNotIn("static-path-must-not-win", serialized)
+        self.assertNotIn("must-not-render", serialized)
 
     def test_runtime_bundle_hydrates_localized_public_content_hub_article(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
@@ -428,6 +501,8 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "category": {"taxonomyId": "web"},
                 "tags": [{"taxonomyId": "seo"}],
                 "publishedAt": "2026-06-27T22:48:09Z",
+                "imageSrc": "https://images.example.test/blog/articulo-es.jpg",
+                "imageAlt": "Imagen de portada en espanol",
                 "articleContent": {"html": "<h2>Contenido ES</h2>"},
                 "localizations": {
                     "en": {
@@ -437,6 +512,8 @@ class RuntimeHandlerTest(unittest.TestCase):
                         "canonicalPath": "/blog/web/english-article",
                         "categorySlug": "web",
                         "tags": ["seo", "guides"],
+                        "imageSrc": "https://images.example.test/blog/english-article.jpg",
+                        "imageAlt": "English cover image",
                         "articleContent": {"html": "<h2>English content</h2>"},
                     }
                 },
@@ -456,11 +533,15 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(main_hub["publicArticles"][0]["locale"], "en")
         self.assertEqual(main_hub["publicArticles"][0]["title"], "English article")
         self.assertEqual(main_hub["publicArticles"][0]["path"], "/blog/web/english-article")
+        self.assertEqual(main_hub["publicArticles"][0]["imageSrc"], "https://images.example.test/blog/english-article.jpg")
+        self.assertEqual(main_hub["publicArticles"][0]["imageAlt"], "English cover image")
         current_article = body["variables"]["variables"]["contentHub"]["currentArticle"]
         self.assertEqual(current_article["articleId"], "art_public")
         self.assertEqual(current_article["locale"], "en")
         self.assertEqual(current_article["summary"], "English summary")
         self.assertEqual(current_article["articleContent"], {"html": "<h2>English content</h2>"})
+        self.assertEqual(current_article["imageSrc"], "https://images.example.test/blog/english-article.jpg")
+        self.assertEqual(current_article["imageAlt"], "English cover image")
         self.assertNotIn("publishedBundleKey", serialized)
 
     def test_runtime_bundle_repairs_mojibake_from_published_site_config_articles(self):
