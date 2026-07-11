@@ -46,7 +46,7 @@ For SAM, IAM, parameter, or workflow changes, also run `sam validate` when SAM i
 
 ## Deploy
 
-Pushes to `dev`, `test`, and `main` trigger AWS deployment workflows. Use the protected promotion path feature branch -> `dev` -> `test` -> `main`, and do not merge or deploy without explicit approval for the target environment. Plain `sam deploy` uses the default production-oriented profile; do not use it for exploratory validation.
+Pushes to `dev`, `test`, and `main` trigger AWS deployment workflows. Use the workflow-guarded promotion path feature branch -> `dev` -> `test` -> `main`, and do not merge or deploy without explicit approval for the target environment. Plain `sam deploy` uses the default production-oriented profile; do not use it for exploratory validation.
 
 The checked-in `samconfig.toml` includes `dev`, `test`, and `prod` deployment profiles in `us-east-1`.
 
