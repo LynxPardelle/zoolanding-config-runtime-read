@@ -2,6 +2,13 @@
 
 This Lambda resolves the active site by domain and route, checks lifecycle status, and returns one effective `TRuntimeBundlePayload` for the Angular app.
 
+## Repository Guide
+
+- Start agent work at [AGENTS.md](AGENTS.md); implementation is in [lambda_function.py](lambda_function.py).
+- IAM and environments are owned by [template.yaml](template.yaml), [samconfig.toml](samconfig.toml), and [.github/workflows](.github/workflows/).
+- Dated evidence belongs in [changelog/](changelog/README.md).
+- Shared ownership and contracts live in the hub [documentation index](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/README.md), [repository map](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/repository-map.md), [managed-alias guide](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/13-managed-alias-front-door.md), and [content-hub package contract](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/api-driven-config/18-content-hub-article-packages.md).
+
 ## Responsibilities
 
 - Read site metadata from DynamoDB.
@@ -29,13 +36,17 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 - `ENVIRONMENT_NAME`
 - `LOG_LEVEL`
 
+## Local verification
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+For SAM, IAM, parameter, or workflow changes, also run `sam validate` when SAM is available and `actionlint` for workflows. Unit tests must not call live AWS services.
+
 ## Deploy
 
-For repeatable deployments from this repository:
-
-```bash
-sam deploy
-```
+Pushes to `dev`, `test`, and `main` trigger AWS deployment workflows. Use the workflow-guarded promotion path feature branch -> `dev` -> `test` -> `main`, and do not merge or deploy without explicit approval for the target environment. Plain `sam deploy` uses the default production-oriented profile; do not use it for exploratory validation.
 
 The checked-in `samconfig.toml` includes `dev`, `test`, and `prod` deployment profiles in `us-east-1`.
 
