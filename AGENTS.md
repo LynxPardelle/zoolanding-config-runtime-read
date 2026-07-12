@@ -1,5 +1,20 @@
 # Zoolanding Config Runtime Read Agent Guide
 
+<!-- zoolanding-hub-routing:start -->
+## Zoolanding Knowledge Router
+
+Read only the row needed for the current task, then inspect the local executable configuration or workflow that owns the behavior.
+
+| Task | Read |
+| --- | --- |
+| Draft lifecycle and runtime publication | [docs/11-draft-lifecycle.md](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/11-draft-lifecycle.md) |
+| Runtime data-source contract | [docs/api-driven-config/15-runtime-api-proxy-data-sources.md](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/api-driven-config/15-runtime-api-proxy-data-sources.md) |
+| Domain and alias behavior | [docs/13-managed-alias-front-door.md](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/13-managed-alias-front-door.md) |
+| Fleet ownership | [docs/repository-map.md](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/repository-map.md) |
+
+Critical repository-specific safety, deployment, and rollback rules remain local.
+<!-- zoolanding-hub-routing:end -->
+
 Use this file as the repository entrypoint. `Codex.md` is only a compatibility pointer.
 
 ## Task Router
