@@ -1,12 +1,11 @@
-# Zoolanding Config Runtime Read Notes
+# Codex Compatibility Pointer
 
-Durable decisions:
+Start with [AGENTS.md](AGENTS.md).
 
-- 2026-06-28 02:56 CT: Public content-hub article routes may hydrate published S3 bundle JSON into the runtime response only after matching environment, hubId, render domain, locale, articleId, and safe revision key. `CONTENT_HUB_PACKAGES_BUCKET_NAME*` must be configured per environment when enriched article bodies are required.
-- 2026-06-29 13:24 CT: Published content-hub article membership resolves public article routes even when a published bundle is absent or invalid. Missing `visibility` remains backwards-compatible as public; explicit non-public visibility, unpublished status, locale mismatch, or absent article metadata still render the configured 404. Invalid, mismatched, or cross-context bundle keys are ignored and never merged into the response.
-- 2026-06-28 19:03 CT: Deploy workflows must let `sam deploy --config-env {env}` load the full `samconfig.toml` parameter set. Do not append a narrow `--parameter-overrides "EnvironmentName=..."` because it can drop content-hub table and package bucket parameters during deployment.
-- 2026-06-28 20:23 CT: Runtime requests without an explicit `lang` must resolve the effective language from `site.i18n.defaultLanguage` before content-hub index enrichment or article bundle lookup. Explicit `lang` query values stay authoritative for multi-language drafts.
-- 2026-06-29 15:14 CT: Public content-hub metadata reads must paginate DynamoDB queries with `LastEvaluatedKey`. Runtime bundles, public article routes, taxonomy indexes, sitemap/feed/search helpers, and SEO hydration must not assume the first 200 metadata items cover a hub.
-- 2026-07-03 05:22 CT: Runtime-read must return the configured 404 bundle for public content-hub category and tag routes when the requested slug is not visible in `publicTaxonomy` and is not inferable from published public articles. `/blog/:categorySlug` and `/blog/tag/:tagSlug` must not render generic listing pages for stale or mistyped slugs.
-- 2026-07-03 11:09 CT: Runtime-read must prefer locale-specific public article metadata from content-hub items when `localizations.{lang}` is present, including optional `articleContent`. UTF-8 source data is canonical; mojibake repair is a defensive compatibility step for legacy published `site-config` article metadata, not a replacement for fixing source data.
-- 2026-07-04 CT: Dynamic content-hub article metadata remains authoritative for status, title, summary, path, taxonomy, and publication state, but runtime-read may supplement missing public cover fields from the draft's static `runtime.contentHubs.publicArticles` entry with the same `articleId`. Only safe `imageSrc` values are exposed: HTTPS absolute URLs without userinfo, unsafe signed-URL markers, whitespace/control characters, or backslashes, or same-origin paths starting with `/`; aliases such as `coverImage`, `heroImage`, and private URL fields must not leak.
+- Current runtime contract: [README.md](README.md)
+- Implementation: [lambda_function.py](lambda_function.py)
+- IAM and environment configuration: [template.yaml](template.yaml) and [samconfig.toml](samconfig.toml)
+- Historical implementation, deploy, and QA evidence: [changelog/README.md](changelog/README.md)
+- Cross-repository ownership: [Zoolanding repository map](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/repository-map.md)
+
+Do not add dated notes here. Keep current behavior with its owning files and chronology in `changelog/`.

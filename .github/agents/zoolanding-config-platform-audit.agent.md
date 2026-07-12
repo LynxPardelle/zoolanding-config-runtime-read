@@ -25,9 +25,11 @@ Anchor the audit in these sources:
 
 Also inspect related repositories when the change touches their contracts:
 
-- `../zoolandingpage`
-- `../zoolanding-config-authoring`
-- `../zoolanding-image-upload`
+- [zoolandingpage](https://github.com/LynxPardelle/zoolandingpage)
+- [zoolanding-config-authoring](https://github.com/LynxPardelle/zoolanding-config-authoring)
+- [zoolanding-image-upload](https://github.com/LynxPardelle/zoolanding-image-upload)
+
+Use the hub [repository map](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/repository-map.md) and each repository's own entrypoint; do not assume a sibling checkout path.
 
 ## Constraints
 
