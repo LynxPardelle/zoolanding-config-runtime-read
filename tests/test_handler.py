@@ -228,7 +228,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertIsNone(body["metadata"]["resolvedAlias"])
         self.assertTrue(any(key.startswith("test-prefix/") for key in self.loaded_keys))
 
-    def test_canonical_domain_environment_query_uses_dev_pointer(self):
+    def test_canonical_domain_environment_query_maps_dev_to_test(self):
         response = self.handler.lambda_handler(
             event("api.zoolandingpage.com.mx", domain="pamelabetancourt.com", environment="dev"),
             Context(),
@@ -236,9 +236,9 @@ class RuntimeHandlerTest(unittest.TestCase):
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
-        self.assertEqual(body["environment"], "dev")
-        self.assertEqual(body["versionId"], "dev-v1")
-        self.assertTrue(any(key.startswith("dev-prefix/") for key in self.loaded_keys))
+        self.assertEqual(body["environment"], "test")
+        self.assertEqual(body["versionId"], "test-v1")
+        self.assertTrue(any(key.startswith("test-prefix/") for key in self.loaded_keys))
 
     def test_parameterized_category_route_resolves_page_payload(self):
         self.metadata["routes"].append({"path": "/blog/:categorySlug", "pageId": "blog-category"})

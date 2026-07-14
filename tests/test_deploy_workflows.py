@@ -26,7 +26,6 @@ class DeployWorkflowTests(unittest.TestCase):
 
     def test_deploy_workflows_do_not_override_samconfig_parameters(self):
         expected_config_envs = {
-            "deploy-dev.yml": "dev",
             "deploy-test.yml": "test",
             "deploy-production.yml": "prod",
         }
@@ -43,7 +42,6 @@ class DeployWorkflowTests(unittest.TestCase):
 
         for parameter_name in (
             "ContentHubMetadataTableName",
-            "ContentHubMetadataTableNameDev",
             "ContentHubMetadataTableNameTest",
             "ContentHubMetadataTableNameProd",
         ):
