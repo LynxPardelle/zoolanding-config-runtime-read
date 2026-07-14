@@ -6,7 +6,7 @@ Parameters:
   EnvironmentName:
     Type: String
     Default: prod
-    AllowedValues: [dev, test, prod, production]
+    AllowedValues: [test, prod, production]
     Description: Deployment environment name used for tags and environment-specific stack configuration.
   ConfigTableName:
     Type: String
@@ -20,10 +20,6 @@ Parameters:
     Type: String
     Default: ''
     Description: Optional content-hub metadata table used to project published public article indexes.
-  ContentHubMetadataTableNameDev:
-    Type: String
-    Default: ''
-    Description: Optional dev content-hub metadata table used when environment=dev.
   ContentHubMetadataTableNameTest:
     Type: String
     Default: ''
@@ -36,10 +32,6 @@ Parameters:
     Type: String
     Default: ''
     Description: Optional content-hub package bucket used to read published public article bundles.
-  ContentHubPackagesBucketNameDev:
-    Type: String
-    Default: ''
-    Description: Optional dev content-hub package bucket used when environment=dev.
   ContentHubPackagesBucketNameTest:
     Type: String
     Default: ''
@@ -60,11 +52,6 @@ Conditions:
       - Fn::Equals:
           - Ref: ContentHubMetadataTableName
           - ''
-  HasContentHubMetadataTableDev:
-    Fn::Not:
-      - Fn::Equals:
-          - Ref: ContentHubMetadataTableNameDev
-          - ''
   HasContentHubMetadataTableTest:
     Fn::Not:
       - Fn::Equals:
@@ -79,11 +66,6 @@ Conditions:
     Fn::Not:
       - Fn::Equals:
           - Ref: ContentHubPackagesBucketName
-          - ''
-  HasContentHubPackagesBucketDev:
-    Fn::Not:
-      - Fn::Equals:
-          - Ref: ContentHubPackagesBucketNameDev
           - ''
   HasContentHubPackagesBucketTest:
     Fn::Not:
@@ -140,16 +122,12 @@ Resources:
             Ref: ConfigPayloadsBucketName
           CONTENT_HUB_METADATA_TABLE_NAME:
             Ref: ContentHubMetadataTableName
-          CONTENT_HUB_METADATA_TABLE_NAME_DEV:
-            Ref: ContentHubMetadataTableNameDev
           CONTENT_HUB_METADATA_TABLE_NAME_TEST:
             Ref: ContentHubMetadataTableNameTest
           CONTENT_HUB_METADATA_TABLE_NAME_PROD:
             Ref: ContentHubMetadataTableNameProd
           CONTENT_HUB_PACKAGES_BUCKET_NAME:
             Ref: ContentHubPackagesBucketName
-          CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV:
-            Ref: ContentHubPackagesBucketNameDev
           CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST:
             Ref: ContentHubPackagesBucketNameTest
           CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD:
@@ -174,15 +152,6 @@ Resources:
                     - dynamodb:Query
                   Resource:
                     Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableName}
-                - Ref: AWS::NoValue
-            - Fn::If:
-                - HasContentHubMetadataTableDev
-                - Effect: Allow
-                  Action:
-                    - dynamodb:GetItem
-                    - dynamodb:Query
-                  Resource:
-                    Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableNameDev}
                 - Ref: AWS::NoValue
             - Fn::If:
                 - HasContentHubMetadataTableTest
@@ -214,14 +183,6 @@ Resources:
                     - s3:GetObject
                   Resource:
                     Fn::Sub: arn:aws:s3:::${ContentHubPackagesBucketName}/content-hubs/*
-                - Ref: AWS::NoValue
-            - Fn::If:
-                - HasContentHubPackagesBucketDev
-                - Effect: Allow
-                  Action:
-                    - s3:GetObject
-                  Resource:
-                    Fn::Sub: arn:aws:s3:::${ContentHubPackagesBucketNameDev}/content-hubs/*
                 - Ref: AWS::NoValue
             - Fn::If:
                 - HasContentHubPackagesBucketTest
