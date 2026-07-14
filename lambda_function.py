@@ -30,11 +30,9 @@ CONFIG_TABLE_NAME = os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry")
 CONFIG_PAYLOADS_BUCKET_NAME = os.getenv("CONFIG_PAYLOADS_BUCKET_NAME", "zoolanding-config-payloads")
 CANONICAL_NOT_FOUND_DOMAIN = os.getenv("CANONICAL_NOT_FOUND_DOMAIN", "zoolandingpage.com.mx")
 CONTENT_HUB_METADATA_TABLE_NAME = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME", "").strip()
-CONTENT_HUB_METADATA_TABLE_NAME_DEV = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_DEV", "").strip()
 CONTENT_HUB_METADATA_TABLE_NAME_TEST = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_TEST", "").strip()
 CONTENT_HUB_METADATA_TABLE_NAME_PROD = os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_PROD", "").strip()
 CONTENT_HUB_PACKAGES_BUCKET_NAME = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME", "").strip()
-CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV", "").strip()
 CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST", "").strip()
 CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD", "").strip()
 SAFE_CONTENT_HUB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -106,11 +104,11 @@ def _normalize_environment(value: Any) -> str:
     environment = str(value or "production").strip().lower()
     if environment in {"prod", "live", "main"}:
         return "production"
-    if environment in {"development", "local"}:
-        return "dev"
+    if environment in {"dev", "development", "local"}:
+        return "test"
     if environment in {"testing", "stage", "staging"}:
         return "test"
-    if environment in {"production", "test", "dev"}:
+    if environment in {"production", "test"}:
         return environment
     return "production"
 
@@ -212,7 +210,6 @@ def _public_content_hubs(metadata: Dict[str, Any]) -> list[Dict[str, Any]]:
 def _content_hub_table_name(environment: Optional[str] = None) -> str:
     normalized_environment = _normalize_environment(environment) if environment else ""
     env_specific = {
-        "dev": os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_DEV", CONTENT_HUB_METADATA_TABLE_NAME_DEV).strip(),
         "test": os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_TEST", CONTENT_HUB_METADATA_TABLE_NAME_TEST).strip(),
         "production": os.getenv("CONTENT_HUB_METADATA_TABLE_NAME_PROD", CONTENT_HUB_METADATA_TABLE_NAME_PROD).strip(),
     }.get(normalized_environment, "")
@@ -222,7 +219,6 @@ def _content_hub_table_name(environment: Optional[str] = None) -> str:
 def _content_hub_packages_bucket_name(environment: Optional[str] = None) -> str:
     normalized_environment = _normalize_environment(environment) if environment else ""
     env_specific = {
-        "dev": os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV", CONTENT_HUB_PACKAGES_BUCKET_NAME_DEV).strip(),
         "test": os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST", CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST).strip(),
         "production": os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD", CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD).strip(),
     }.get(normalized_environment, "")
