@@ -1,9 +1,39 @@
 import pathlib
+import re
+import shlex
 import subprocess
+import tomllib
 import unittest
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+CHECKOUT_ACTION = "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd"
+SETUP_NODE_ACTION = "actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444"
+SETUP_PYTHON_ACTION = "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
+SETUP_SAM_ACTION = "aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310"
+UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+DOWNLOAD_ARTIFACT_ACTION = "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131"
+GITHUB_SCRIPT_ACTION = "actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd"
+CONFIGURE_AWS_ACTION = "aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d"
+VERIFIER_BLOB = "a1e369e4e6d7a24b3595e5604a6fddab51af526d"
+
+
+def deploy_script(workflow_text):
+    marker = "      - name: Deploy "
+    start = workflow_text.rindex(marker)
+    run_marker = "        run: |\n"
+    run_line = "        run: "
+    if run_marker not in workflow_text[start:]:
+        line_start = workflow_text.index(run_line, start) + len(run_line)
+        return workflow_text[line_start:].splitlines()[0]
+    script_start = workflow_text.index(run_marker, start) + len(run_marker)
+    lines = []
+    for line in workflow_text[script_start:].splitlines():
+        if line and not line.startswith("          "):
+            break
+        lines.append(line[10:] if line else "")
+    return "\n".join(lines).strip()
 
 
 class DeployWorkflowTests(unittest.TestCase):
@@ -34,8 +64,12 @@ class DeployWorkflowTests(unittest.TestCase):
 
     def test_ci_runs_the_audited_node_promotion_contract(self):
         text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        self.assertIn("actions/setup-node@v5", text)
-        setup_node = text.index("actions/setup-node@v5")
+        self.assertIn(CHECKOUT_ACTION, text)
+        self.assertIn(SETUP_NODE_ACTION, text)
+        self.assertIn(SETUP_PYTHON_ACTION, text)
+        self.assertIn(SETUP_SAM_ACTION, text)
+        self.assertIn("version: 1.163.0", text)
+        setup_node = text.index(SETUP_NODE_ACTION)
         unit_tests = text.index('python -m unittest discover -s tests -p "test_*.py"')
 
         self.assertLess(setup_node, unit_tests)
@@ -50,7 +84,7 @@ class DeployWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_promotion_verifier_matches_the_audited_hub_blob(self):
+    def test_promotion_verifier_matches_the_audited_blob(self):
         verifier = REPO_ROOT / "tools" / "verify-promotion-commit.mjs"
         self.assertTrue(verifier.is_file())
 
@@ -62,7 +96,19 @@ class DeployWorkflowTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "dcbdf1a3a3ac5422ff09870a060ceddb4c109e5d")
+        self.assertEqual(result.stdout.strip(), VERIFIER_BLOB)
+        verifier_text = verifier.read_text(encoding="utf-8")
+        self.assertNotIn("tip-only", verifier_text)
+        self.assertIn("parents[0] !== pullRequest.base.sha", verifier_text)
+        self.assertIn("parents[1] !== pullRequest.head.sha", verifier_text)
+        self.assertIn("const finalTargetTipSha = await fetchTargetBranchSha", verifier_text)
+
+    def test_all_workflow_actions_are_sha_pinned(self):
+        for workflow in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+            text = workflow.read_text(encoding="utf-8")
+            for reference in re.findall(r"(?m)^\s+(?:-\s+)?uses:\s+([^\s#]+)", text):
+                with self.subTest(workflow=workflow.name, reference=reference):
+                    self.assertRegex(reference, r"@[a-f0-9]{40}$")
 
     def test_ci_guard_uses_environment_indirection_for_github_refs(self):
         text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -71,6 +117,8 @@ class DeployWorkflowTests(unittest.TestCase):
             ("EVENT_NAME", "github.event_name"),
             ("BASE_REF", "github.base_ref"),
             ("HEAD_REF", "github.head_ref"),
+            ("HEAD_REPO", "github.event.pull_request.head.repo.full_name"),
+            ("REPOSITORY", "github.repository"),
         ):
             with self.subTest(variable=variable):
                 self.assertIn(f"{variable}: ${{{{ {expression} }}}}", text)
@@ -78,28 +126,64 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertIn('if [[ "$EVENT_NAME" != "pull_request" ]]', text)
         self.assertIn('base="$BASE_REF"', text)
         self.assertIn('head="$HEAD_REF"', text)
+        self.assertIn('if [[ "$base" == "test" || "$base" == "main" ]]', text)
+        self.assertIn('[[ "$HEAD_REPO" != "$REPOSITORY" ]]', text)
         self.assertNotIn('if [[ "${{ github.event_name }}"', text)
         self.assertNotIn('base="${{ github.base_ref }}"', text)
         self.assertNotIn('head="${{ github.head_ref }}"', text)
 
-    def test_deploy_workflows_do_not_override_samconfig_parameters(self):
+    def test_deploy_workflows_reproduce_samconfig_with_explicit_parameters(self):
         expected_config_envs = {
             "deploy-test.yml": "test",
             "deploy-production.yml": "prod",
         }
 
+        with (REPO_ROOT / "samconfig.toml").open("rb") as handle:
+            samconfig = tomllib.load(handle)
+
         for workflow_name, config_env in expected_config_envs.items():
             with self.subTest(workflow=workflow_name):
                 workflow = REPO_ROOT / ".github" / "workflows" / workflow_name
                 text = workflow.read_text(encoding="utf-8")
-                self.assertIn(f"sam deploy --config-env {config_env}", text)
-                self.assertNotIn("--parameter-overrides", text)
+                parameters = samconfig[config_env]["deploy"]["parameters"]
+                self.assertEqual(
+                    {
+                        "stack_name",
+                        "resolve_s3",
+                        "s3_prefix",
+                        "region",
+                        "confirm_changeset",
+                        "capabilities",
+                        "parameter_overrides",
+                    },
+                    set(parameters),
+                )
+                self.assertIs(parameters["resolve_s3"], True)
+                self.assertIs(parameters["confirm_changeset"], False)
+                command = deploy_script(text).replace("\\\n", " ")
+                tokens = shlex.split(command)
+                expected_before_parameters = [
+                    "sam", "deploy",
+                    "--template-file", ".aws-sam/build/template.yaml",
+                    "--stack-name", parameters["stack_name"],
+                    "--region", parameters["region"],
+                    "--resolve-s3",
+                    "--s3-prefix", parameters["s3_prefix"],
+                    "--capabilities", parameters["capabilities"],
+                    "--no-confirm-changeset",
+                    "--no-fail-on-empty-changeset",
+                    "--parameter-overrides",
+                ]
+                self.assertEqual(tokens[:len(expected_before_parameters)], expected_before_parameters)
+                self.assertEqual(tokens[len(expected_before_parameters):], parameters["parameter_overrides"])
+                self.assertNotIn("--config-env", tokens)
 
     def test_deploy_workflows_require_exact_merged_pr_provenance(self):
         cases = {
             "deploy-test.yml": ("dev", "test", "test"),
             "deploy-production.yml": ("test", "main", "production"),
         }
+        inline_verifiers = []
 
         for workflow_name, (source_branch, target_branch, environment_name) in cases.items():
             with self.subTest(workflow=workflow_name):
@@ -115,6 +199,9 @@ class DeployWorkflowTests(unittest.TestCase):
                 self.assertIn("contents: read", top_level)
                 self.assertIn("pull-requests: read", top_level)
                 self.assertNotIn("id-token: write", top_level)
+                self.assertIn("AWS_DEFAULT_REGION: us-east-1", top_level)
+                self.assertIn("AWS_REGION: us-east-1", top_level)
+                self.assertIn("SAM_CLI_TELEMETRY: 0", top_level)
                 self.assertIn("concurrency:", top_level)
                 self.assertIn(
                     f"group: runtime-read-{environment_name}-${{{{ github.repository }}}}-${{{{ github.ref }}}}",
@@ -125,25 +212,166 @@ class DeployWorkflowTests(unittest.TestCase):
                 self.assertNotIn("concurrency:", text[deploy_index:])
                 self.assertEqual(text.count(exact_command), 2)
                 self.assertNotIn("--tip-only=true", text)
-                self.assertLess(text.index("actions/setup-node@v5"), text.index(exact_command))
+                for action in (
+                    CHECKOUT_ACTION,
+                    SETUP_NODE_ACTION,
+                    SETUP_PYTHON_ACTION,
+                    SETUP_SAM_ACTION,
+                    UPLOAD_ARTIFACT_ACTION,
+                ):
+                    self.assertIn(action, text[:deploy_index])
                 self.assertNotIn("rev-list --parents", text)
                 self.assertNotIn("merge-base --is-ancestor", text)
                 self.assertNotIn("HEAD^2", text)
                 self.assertIn(f"environment: {environment_name}", text[deploy_index:])
                 self.assertIn("id-token: write", text[deploy_index:])
                 self.assertIn("pull-requests: read", text[deploy_index:])
-                self.assertIn("persist-credentials: false", text[deploy_index:])
-                self.assertIn("fetch-depth: 0", text[deploy_index:])
-                self.assertIn("test \"$(git rev-parse HEAD)\" = \"$EXPECTED_SHA\"", text[deploy_index:])
 
                 first_verifier = text.index(exact_command)
                 second_verifier = text.index(exact_command, first_verifier + len(exact_command))
-                rebuild = text.index("- name: Rebuild validated commit", deploy_index)
-                credentials = text.index("aws-actions/configure-aws-credentials@v6", deploy_index)
-                credentials_step = text.rfind("\n      - uses:", second_verifier, credentials)
-                self.assertLess(rebuild, second_verifier)
-                self.assertLess(second_verifier, credentials_step)
-                self.assertNotIn("\n      - ", text[second_verifier + len(exact_command):credentials_step])
+                validate_section = text[text.index("\n  validate:"):deploy_index]
+                deploy_section = text[deploy_index:]
+                credentials = text.index(CONFIGURE_AWS_ACTION, deploy_index)
+                artifact_name = (
+                    f"runtime-read-{environment_name}-build-"
+                    "${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}"
+                )
+
+                self.assertIn("python -m unittest", validate_section)
+                self.assertIn("sam validate --lint", validate_section)
+                self.assertIn("sam build --no-cached", validate_section)
+                self.assertIn("python tools/build_lambda_artifact.py", validate_section)
+                self.assertIn(
+                    "python tools/build_lambda_artifact.py --verify-artifact "
+                    ".aws-sam/build/ConfigRuntimeReadFunction",
+                    validate_section,
+                )
+                self.assertIn("build-manifest.sha256", validate_section)
+                self.assertIn("outputs:", validate_section)
+                self.assertIn("artifact_id: ${{ steps.upload.outputs.artifact-id }}", validate_section)
+                self.assertIn("artifact_name: ${{ steps.artifact_metadata.outputs.artifact_name }}", validate_section)
+                self.assertIn("manifest_digest: ${{ steps.artifact_metadata.outputs.manifest_digest }}", validate_section)
+                self.assertIn("id: artifact_metadata", validate_section)
+                self.assertIn("id: upload", validate_section)
+                self.assertIn('[[ "$manifest_digest" =~ ^[a-f0-9]{64}$ ]]', validate_section)
+                self.assertEqual(text.count(artifact_name), 1)
+                self.assertIn("include-hidden-files: true", validate_section)
+                self.assertIn("retention-days: 1", validate_section)
+                self.assertIn(
+                    "path: |\n"
+                    "            .aws-sam/build/template.yaml\n"
+                    "            .aws-sam/build/ConfigRuntimeReadFunction/lambda_function.py\n"
+                    "            .aws-sam/build/ConfigRuntimeReadFunction/zoolanding_lambda_common.py\n"
+                    "            .aws-sam/build-manifest.sha256",
+                    validate_section,
+                )
+                self.assertNotIn("            .aws-sam/build/\n", validate_section)
+                self.assertNotIn(".env", validate_section)
+                self.assertNotIn("samconfig.toml", validate_section)
+                self.assertGreater(second_verifier, text.index(UPLOAD_ARTIFACT_ACTION))
+                self.assertIn(DOWNLOAD_ARTIFACT_ACTION, deploy_section)
+                self.assertIn(SETUP_SAM_ACTION, deploy_section)
+                self.assertIn("version: 1.163.0", deploy_section)
+                self.assertIn(GITHUB_SCRIPT_ACTION, deploy_section)
+                self.assertIn(CONFIGURE_AWS_ACTION, deploy_section)
+                self.assertIn("id: validate_artifact_metadata", deploy_section)
+                self.assertEqual(deploy_section.count("${{ needs.validate.outputs.artifact_id }}"), 1)
+                self.assertEqual(deploy_section.count("${{ needs.validate.outputs.artifact_name }}"), 1)
+                self.assertEqual(deploy_section.count("${{ needs.validate.outputs.manifest_digest }}"), 1)
+                self.assertIn("RAW_ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}", deploy_section)
+                self.assertIn("RAW_ARTIFACT_NAME: ${{ needs.validate.outputs.artifact_name }}", deploy_section)
+                self.assertIn("RAW_MANIFEST_DIGEST: ${{ needs.validate.outputs.manifest_digest }}", deploy_section)
+                self.assertIn("artifact-ids: ${{ steps.validate_artifact_metadata.outputs.artifact_id }}", deploy_section)
+                self.assertIn("ARTIFACT_ID: ${{ steps.validate_artifact_metadata.outputs.artifact_id }}", deploy_section)
+                self.assertIn("ARTIFACT_NAME: ${{ steps.validate_artifact_metadata.outputs.artifact_name }}", deploy_section)
+                self.assertIn(
+                    "EXPECTED_MANIFEST_DIGEST: "
+                    "${{ steps.validate_artifact_metadata.outputs.manifest_digest }}",
+                    deploy_section,
+                )
+                self.assertIn('[[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]', deploy_section)
+                self.assertIn('[[ "$artifact_id" != *","* ]]', deploy_section)
+                self.assertIn('[[ "$manifest_digest" =~ ^[a-f0-9]{64}$ ]]', deploy_section)
+                self.assertIn("EXPECTED_SHA: ${{ github.sha }}", deploy_section)
+                self.assertIn(
+                    f'[[ "$artifact_name" =~ ^runtime-read-{environment_name}-build-'
+                    '[1-9][0-9]*-[1-9][0-9]*-${EXPECTED_SHA}$ ]]',
+                    deploy_section,
+                )
+                self.assertIn(
+                    "printf 'artifact_id=%s\\nartifact_name=%s\\nmanifest_digest=%s\\n'",
+                    deploy_section,
+                )
+                self.assertIn("sha256sum --check --strict ../build-manifest.sha256", deploy_section)
+                self.assertIn('[[ "$EXPECTED_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]', deploy_section)
+                self.assertIn('test "$actual_manifest_digest" = "$EXPECTED_MANIFEST_DIGEST"', deploy_section)
+                self.assertNotIn("python -m unittest", deploy_section)
+                self.assertNotIn("sam build", deploy_section)
+                self.assertNotIn(SETUP_PYTHON_ACTION, deploy_section)
+                self.assertNotIn(CHECKOUT_ACTION, deploy_section)
+                self.assertNotIn(SETUP_NODE_ACTION, deploy_section)
+                self.assertNotIn("tools/verify-promotion-commit.mjs", deploy_section)
+                self.assertNotIn("run-id:", deploy_section)
+                self.assertNotIn("github.run_id", deploy_section)
+                self.assertNotIn("github.run_attempt", deploy_section)
+                self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST", deploy_section)
+                self.assertIn("pullRequest.base?.repo?.full_name === repository", deploy_section)
+                self.assertIn("pullRequest.head?.repo?.full_name === repository", deploy_section)
+                self.assertIn("pullRequest.merge_commit_sha == null", deploy_section)
+                self.assertIn("parents[0] !== pullRequest.base.sha", deploy_section)
+                self.assertIn("parents[1] !== pullRequest.head.sha", deploy_section)
+                self.assertIn("event.after !== sha", deploy_section)
+                self.assertIn("context.eventName !== 'workflow_dispatch'", deploy_section)
+                self.assertIn("branch.commit.sha !== sha", deploy_section)
+                self.assertIn("--template-file .aws-sam/build/template.yaml", deploy_section)
+
+                download_start = text.index(DOWNLOAD_ARTIFACT_ACTION, deploy_index)
+                download_end = text.index("\n      - name:", download_start)
+                self.assertNotIn("github-token:", text[download_start:download_end])
+                self.assertNotIn("run-id:", text[download_start:download_end])
+                self.assertNotIn("name: runtime-read-", text[download_start:download_end])
+
+                steps_start = text.index("\n    steps:\n", deploy_index) + len("\n    steps:\n")
+                first_step = text.index("      - ", steps_start)
+                metadata_step = text.index("      - name: Validate artifact metadata", deploy_index)
+                self.assertEqual(first_step, metadata_step)
+                self.assertLess(metadata_step, download_start)
+                setup_sam = text.index(SETUP_SAM_ACTION, deploy_index)
+                self.assertLess(download_start, setup_sam)
+
+                digest_check = text.index('test "$actual_manifest_digest" = "$EXPECTED_MANIFEST_DIGEST"', deploy_index)
+                strict_check = text.index("sha256sum --check --strict", digest_check)
+                self.assertLess(digest_check, strict_check)
+
+                github_script = text.index(GITHUB_SCRIPT_ACTION, deploy_index)
+                self.assertLess(setup_sam, github_script)
+                credentials_step = text.rfind("\n      - uses:", github_script, credentials)
+                self.assertLess(github_script, credentials)
+                final_tip_check = text.index("branch.commit.sha !== sha", github_script)
+                self.assertNotIn("\n      - ", text[final_tip_check:credentials_step])
+
+                script_marker = "          script: |\n"
+                script_start = text.index(script_marker, github_script) + len(script_marker)
+                script_lines = []
+                for line in text[script_start:].splitlines():
+                    if line and not line.startswith("            "):
+                        break
+                    script_lines.append(line[12:] if line else "")
+                inline_verifiers.append("\n".join(script_lines).strip())
+
+        self.assertEqual(len(inline_verifiers), 2)
+        self.assertEqual(inline_verifiers[0], inline_verifiers[1])
+
+    def test_release_docs_describe_the_nonexecuting_oidc_artifact_handoff(self):
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        deploy = readme[readme.index("## Deploy"):readme.index("## Manual smoke test")]
+
+        self.assertIn("validation job without OIDC", deploy)
+        self.assertIn("same workflow run", deploy)
+        self.assertIn("does not check out or execute repository code", deploy)
+        self.assertIn("one day", deploy)
+        self.assertIn("explicit parameters", deploy)
+        self.assertNotIn("privileged job rebuilds the candidate", deploy)
 
     def test_template_allows_slug_pointer_reads_on_content_hub_tables(self):
         text = (REPO_ROOT / "template.yaml").read_text(encoding="utf-8")
