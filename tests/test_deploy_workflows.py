@@ -62,6 +62,44 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertNotRegex(readme, r"(?m)^- `dev` uses ")
         self.assertIn("Pushes to `dev` run CI only", readme)
 
+    def test_runtime_execution_boundary_is_required_for_every_deploy_profile(self):
+        template = (REPO_ROOT / "template.yaml").read_text(encoding="utf-8")
+        parameter_start = template.index("  RuntimeExecutionBoundaryArn:")
+        parameter_end = template.index("\nConditions:", parameter_start)
+        parameter_block = template[parameter_start:parameter_end]
+
+        self.assertIn("    Type: String", parameter_block)
+        self.assertNotIn("Default:", parameter_block)
+        self.assertIn(
+            "      PermissionsBoundary:\n        Ref: RuntimeExecutionBoundaryArn",
+            template,
+        )
+
+        expected_boundary_arns = {
+            "default": (
+                "arn:aws:iam::765932874577:policy/"
+                "zoolanding-config-runtime-read-production-execution-boundary"
+            ),
+            "test": (
+                "arn:aws:iam::765932874577:policy/"
+                "zoolanding-config-runtime-read-test-execution-boundary"
+            ),
+            "prod": (
+                "arn:aws:iam::765932874577:policy/"
+                "zoolanding-config-runtime-read-production-execution-boundary"
+            ),
+        }
+        with (REPO_ROOT / "samconfig.toml").open("rb") as handle:
+            samconfig = tomllib.load(handle)
+
+        for config_env, boundary_arn in expected_boundary_arns.items():
+            with self.subTest(config_env=config_env):
+                overrides = samconfig[config_env]["deploy"]["parameters"]["parameter_overrides"]
+                self.assertEqual(
+                    [value for value in overrides if value.startswith("RuntimeExecutionBoundaryArn=")],
+                    [f"RuntimeExecutionBoundaryArn={boundary_arn}"],
+                )
+
     def test_ci_runs_the_audited_node_promotion_contract(self):
         text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn(CHECKOUT_ACTION, text)
@@ -170,6 +208,7 @@ class DeployWorkflowTests(unittest.TestCase):
                     "--resolve-s3",
                     "--s3-prefix", parameters["s3_prefix"],
                     "--capabilities", parameters["capabilities"],
+                    "--role-arn", "$AWS_CLOUDFORMATION_ROLE_ARN",
                     "--no-confirm-changeset",
                     "--no-fail-on-empty-changeset",
                     "--parameter-overrides",
@@ -180,12 +219,29 @@ class DeployWorkflowTests(unittest.TestCase):
 
     def test_deploy_workflows_require_exact_merged_pr_provenance(self):
         cases = {
-            "deploy-test.yml": ("dev", "test", "test"),
-            "deploy-production.yml": ("test", "main", "production"),
+            "deploy-test.yml": (
+                "dev",
+                "test",
+                "test",
+                "arn:aws:iam::765932874577:role/"
+                "zoolanding-config-runtime-read-test-cfn-exec",
+            ),
+            "deploy-production.yml": (
+                "test",
+                "main",
+                "production",
+                "arn:aws:iam::765932874577:role/"
+                "zoolanding-config-runtime-read-production-cfn-exec",
+            ),
         }
         inline_verifiers = []
 
-        for workflow_name, (source_branch, target_branch, environment_name) in cases.items():
+        for workflow_name, (
+            source_branch,
+            target_branch,
+            environment_name,
+            expected_cloudformation_role_arn,
+        ) in cases.items():
             with self.subTest(workflow=workflow_name):
                 text = (REPO_ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
                 jobs_index = text.index("\njobs:")
@@ -232,6 +288,19 @@ class DeployWorkflowTests(unittest.TestCase):
                 validate_section = text[text.index("\n  validate:"):deploy_index]
                 deploy_section = text[deploy_index:]
                 credentials = text.index(CONFIGURE_AWS_ACTION, deploy_index)
+                exact_role_validation = (
+                    'test "$AWS_CLOUDFORMATION_ROLE_ARN" = '
+                    f'"{expected_cloudformation_role_arn}"'
+                )
+                role_validation = text.find(exact_role_validation, deploy_index)
+                self.assertNotEqual(role_validation, -1)
+                self.assertIn(
+                    "AWS_CLOUDFORMATION_ROLE_ARN: "
+                    "${{ vars.AWS_CLOUDFORMATION_ROLE_ARN }}",
+                    deploy_section,
+                )
+                self.assertNotIn('test -n "$AWS_CLOUDFORMATION_ROLE_ARN"', deploy_section)
+                self.assertLess(role_validation, credentials)
                 artifact_name = (
                     f"runtime-read-{environment_name}-build-"
                     "${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}"
@@ -371,7 +440,21 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertIn("does not check out or execute repository code", deploy)
         self.assertIn("one day", deploy)
         self.assertIn("explicit parameters", deploy)
+        self.assertIn("cannot expand IAM permissions", deploy)
+        self.assertIn("permissions boundary and CloudFormation execution role", deploy)
         self.assertNotIn("privileged job rebuilds the candidate", deploy)
+
+    def test_release_docs_define_persistent_stack_role_and_safe_replacement_order(self):
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        deploy = readme[readme.index("## Deploy"):readme.index("## Manual smoke test")]
+
+        self.assertIn("CloudFormation stores `--role-arn` on the stack", deploy)
+        self.assertIn("does not detach or roll back that association", deploy)
+        self.assertIn("temporary bootstrap and caller rollback", deploy)
+        self.assertIn("does not change the stack's retained CloudFormation role", deploy)
+        self.assertIn("create or update the replacement in `zoolandingpage-aws-infra` first", deploy)
+        self.assertIn("verify the stack's `RoleARN`", deploy)
+        self.assertIn("fail closed before requesting AWS credentials", deploy)
 
     def test_template_allows_slug_pointer_reads_on_content_hub_tables(self):
         text = (REPO_ROOT / "template.yaml").read_text(encoding="utf-8")
