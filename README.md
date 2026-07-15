@@ -88,9 +88,23 @@ https://y84vk0v44l.execute-api.us-east-1.amazonaws.com/Prod/runtime-bundle
 
 ## Manual smoke test
 
-```bash
-curl "https://your-api-id.execute-api.us-east-1.amazonaws.com/Prod/runtime-bundle?domain=test.zoolandingpage.com.mx&path=/&lang=es"
+The currently verified test pilot is the authored alias `test.zoositioweb.com.mx`. Keep the response body in memory and print only the contract fields:
+
+```powershell
+$publicResponse = Invoke-WebRequest "https://your-api-id.execute-api.us-east-1.amazonaws.com/Prod/runtime-bundle?domain=test.zoositioweb.com.mx&path=/&lang=es"
+$publicPayload = $publicResponse.Content | ConvertFrom-Json
+[pscustomobject]@{
+  httpStatus = [int]$publicResponse.StatusCode
+  metadataStatus = $publicPayload.metadata.statusCode
+  notFound = $publicPayload.metadata.notFound
+  hasSiteConfig = $null -ne $publicPayload.siteConfig
+  hasPageConfig = $null -ne $publicPayload.pageConfig
+}
 ```
+
+The public home smoke must return HTTP `200`, `metadata.statusCode` `200`, `metadata.notFound` `false`, and both config flags `true`.
+
+`/server/*` is not a backend descriptor route. For the verified pilot, a request such as `path=%2Fserver%2Fintegrations.json` returns an HTTP `200` public not-found bundle whose `metadata.statusCode` is `404`, whose `metadata.notFound` is `true`, and whose route is `/404`; it does not expose a server descriptor. Inspect only those fields and never print or persist the full response during an operational smoke.
 
 The request also works without the `domain` query string when the API receives a `Host` or `X-Forwarded-Host` header that matches a configured site or an authored alias.
 
