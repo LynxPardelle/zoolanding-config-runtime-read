@@ -110,7 +110,7 @@ Resources:
   ConfigRuntimeReadFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: .
+      CodeUri: .build/runtime-read
       Handler: lambda_function.lambda_handler
       Description: Resolves the current site by domain and route and returns one effective runtime bundle.
       ReservedConcurrentExecutions: 100

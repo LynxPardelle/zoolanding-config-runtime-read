@@ -21,6 +21,10 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_name: ${{ steps.artifact_metadata.outputs.artifact_name }}
+      manifest_digest: ${{ steps.artifact_metadata.outputs.manifest_digest }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -64,21 +68,32 @@ jobs:
         run: |
           set -euo pipefail
           python -m unittest discover -s tests -p "test_*.py"
+          python tools/build_lambda_artifact.py
           sam validate --lint
           sam build --no-cached
+          python tools/build_lambda_artifact.py --verify-artifact .aws-sam/build/ConfigRuntimeReadFunction
 
       - name: Write validated build manifest
+        id: artifact_metadata
         shell: bash
         run: |
           set -euo pipefail
           (cd .aws-sam/build && LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > .aws-sam/build-manifest.sha256
+          artifact_name="runtime-read-test-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}"
+          manifest_digest="$(sha256sum .aws-sam/build-manifest.sha256 | cut -d ' ' -f1)"
+          [[ "$artifact_name" =~ ^runtime-read-test-build-[1-9][0-9]*-[1-9][0-9]*-[a-f0-9]{40}$ ]]
+          [[ "$manifest_digest" =~ ^[a-f0-9]{64}$ ]]
+          printf 'artifact_name=%s\nmanifest_digest=%s\n' "$artifact_name" "$manifest_digest" >> "$GITHUB_OUTPUT"
 
       - name: Upload exact validated artifact
+        id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: runtime-read-test-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          name: ${{ steps.artifact_metadata.outputs.artifact_name }}
           path: |
-            .aws-sam/build/
+            .aws-sam/build/template.yaml
+            .aws-sam/build/ConfigRuntimeReadFunction/lambda_function.py
+            .aws-sam/build/ConfigRuntimeReadFunction/zoolanding_lambda_common.py
             .aws-sam/build-manifest.sha256
           if-no-files-found: error
           include-hidden-files: true
@@ -99,28 +114,59 @@ jobs:
       id-token: write
       pull-requests: read
     steps:
+      - name: Validate artifact metadata
+        id: validate_artifact_metadata
+        shell: bash
+        env:
+          RAW_ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
+          RAW_ARTIFACT_NAME: ${{ needs.validate.outputs.artifact_name }}
+          RAW_MANIFEST_DIGEST: ${{ needs.validate.outputs.manifest_digest }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          artifact_id="$RAW_ARTIFACT_ID"
+          artifact_name="$RAW_ARTIFACT_NAME"
+          manifest_digest="$RAW_MANIFEST_DIGEST"
+          [[ "$EXPECTED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$artifact_id" != *","* ]]
+          [[ "$artifact_name" =~ ^runtime-read-test-build-[1-9][0-9]*-[1-9][0-9]*-${EXPECTED_SHA}$ ]]
+          [[ "$manifest_digest" =~ ^[a-f0-9]{64}$ ]]
+          printf 'artifact_id=%s\nartifact_name=%s\nmanifest_digest=%s\n' \
+            "$artifact_id" "$artifact_name" "$manifest_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Download validated artifact from this workflow run
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ steps.validate_artifact_metadata.outputs.artifact_id }}
+          path: .aws-sam
+          merge-multiple: true
+
+      - name: Verify validated build artifact
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.validate_artifact_metadata.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ steps.validate_artifact_metadata.outputs.artifact_name }}
+          EXPECTED_MANIFEST_DIGEST: ${{ steps.validate_artifact_metadata.outputs.manifest_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARTIFACT_NAME" =~ ^runtime-read-test-build-[1-9][0-9]*-[1-9][0-9]*-[a-f0-9]{40}$ ]]
+          [[ "$EXPECTED_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          test -f .aws-sam/build/template.yaml
+          test -f .aws-sam/build-manifest.sha256
+          actual_manifest_digest="$(sha256sum .aws-sam/build-manifest.sha256 | cut -d ' ' -f1)"
+          test "$actual_manifest_digest" = "$EXPECTED_MANIFEST_DIGEST"
+          (cd .aws-sam/build && sha256sum --check --strict ../build-manifest.sha256)
+          cut -c67- .aws-sam/build-manifest.sha256 | LC_ALL=C sort > "$RUNNER_TEMP/manifest-paths.txt"
+          (cd .aws-sam/build && LC_ALL=C find . -type f -print | LC_ALL=C sort) > "$RUNNER_TEMP/artifact-paths.txt"
+          diff -u "$RUNNER_TEMP/manifest-paths.txt" "$RUNNER_TEMP/artifact-paths.txt"
+
       - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
         with:
           version: 1.163.0
           use-installer: true
           token: ${{ github.token }}
-
-      - name: Download validated artifact from this workflow run
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: runtime-read-test-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
-          path: .aws-sam
-
-      - name: Verify validated build artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f .aws-sam/build/template.yaml
-          test -f .aws-sam/build-manifest.sha256
-          (cd .aws-sam/build && sha256sum --check ../build-manifest.sha256)
-          cut -c67- .aws-sam/build-manifest.sha256 | LC_ALL=C sort > "$RUNNER_TEMP/manifest-paths.txt"
-          (cd .aws-sam/build && LC_ALL=C find . -type f -print | LC_ALL=C sort) > "$RUNNER_TEMP/artifact-paths.txt"
-          diff -u "$RUNNER_TEMP/manifest-paths.txt" "$RUNNER_TEMP/artifact-paths.txt"
 
       - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:

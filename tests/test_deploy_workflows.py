@@ -146,6 +146,20 @@ class DeployWorkflowTests(unittest.TestCase):
                 workflow = REPO_ROOT / ".github" / "workflows" / workflow_name
                 text = workflow.read_text(encoding="utf-8")
                 parameters = samconfig[config_env]["deploy"]["parameters"]
+                self.assertEqual(
+                    {
+                        "stack_name",
+                        "resolve_s3",
+                        "s3_prefix",
+                        "region",
+                        "confirm_changeset",
+                        "capabilities",
+                        "parameter_overrides",
+                    },
+                    set(parameters),
+                )
+                self.assertIs(parameters["resolve_s3"], True)
+                self.assertIs(parameters["confirm_changeset"], False)
                 command = deploy_script(text).replace("\\\n", " ")
                 tokens = shlex.split(command)
                 expected_before_parameters = [
@@ -226,16 +240,32 @@ class DeployWorkflowTests(unittest.TestCase):
                 self.assertIn("python -m unittest", validate_section)
                 self.assertIn("sam validate --lint", validate_section)
                 self.assertIn("sam build --no-cached", validate_section)
+                self.assertIn("python tools/build_lambda_artifact.py", validate_section)
+                self.assertIn(
+                    "python tools/build_lambda_artifact.py --verify-artifact "
+                    ".aws-sam/build/ConfigRuntimeReadFunction",
+                    validate_section,
+                )
                 self.assertIn("build-manifest.sha256", validate_section)
-                self.assertEqual(text.count(artifact_name), 2)
+                self.assertIn("outputs:", validate_section)
+                self.assertIn("artifact_id: ${{ steps.upload.outputs.artifact-id }}", validate_section)
+                self.assertIn("artifact_name: ${{ steps.artifact_metadata.outputs.artifact_name }}", validate_section)
+                self.assertIn("manifest_digest: ${{ steps.artifact_metadata.outputs.manifest_digest }}", validate_section)
+                self.assertIn("id: artifact_metadata", validate_section)
+                self.assertIn("id: upload", validate_section)
+                self.assertIn('[[ "$manifest_digest" =~ ^[a-f0-9]{64}$ ]]', validate_section)
+                self.assertEqual(text.count(artifact_name), 1)
                 self.assertIn("include-hidden-files: true", validate_section)
                 self.assertIn("retention-days: 1", validate_section)
                 self.assertIn(
                     "path: |\n"
-                    "            .aws-sam/build/\n"
+                    "            .aws-sam/build/template.yaml\n"
+                    "            .aws-sam/build/ConfigRuntimeReadFunction/lambda_function.py\n"
+                    "            .aws-sam/build/ConfigRuntimeReadFunction/zoolanding_lambda_common.py\n"
                     "            .aws-sam/build-manifest.sha256",
                     validate_section,
                 )
+                self.assertNotIn("            .aws-sam/build/\n", validate_section)
                 self.assertNotIn(".env", validate_section)
                 self.assertNotIn("samconfig.toml", validate_section)
                 self.assertGreater(second_verifier, text.index(UPLOAD_ARTIFACT_ACTION))
@@ -244,7 +274,37 @@ class DeployWorkflowTests(unittest.TestCase):
                 self.assertIn("version: 1.163.0", deploy_section)
                 self.assertIn(GITHUB_SCRIPT_ACTION, deploy_section)
                 self.assertIn(CONFIGURE_AWS_ACTION, deploy_section)
-                self.assertIn("sha256sum --check ../build-manifest.sha256", deploy_section)
+                self.assertIn("id: validate_artifact_metadata", deploy_section)
+                self.assertEqual(deploy_section.count("${{ needs.validate.outputs.artifact_id }}"), 1)
+                self.assertEqual(deploy_section.count("${{ needs.validate.outputs.artifact_name }}"), 1)
+                self.assertEqual(deploy_section.count("${{ needs.validate.outputs.manifest_digest }}"), 1)
+                self.assertIn("RAW_ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}", deploy_section)
+                self.assertIn("RAW_ARTIFACT_NAME: ${{ needs.validate.outputs.artifact_name }}", deploy_section)
+                self.assertIn("RAW_MANIFEST_DIGEST: ${{ needs.validate.outputs.manifest_digest }}", deploy_section)
+                self.assertIn("artifact-ids: ${{ steps.validate_artifact_metadata.outputs.artifact_id }}", deploy_section)
+                self.assertIn("ARTIFACT_ID: ${{ steps.validate_artifact_metadata.outputs.artifact_id }}", deploy_section)
+                self.assertIn("ARTIFACT_NAME: ${{ steps.validate_artifact_metadata.outputs.artifact_name }}", deploy_section)
+                self.assertIn(
+                    "EXPECTED_MANIFEST_DIGEST: "
+                    "${{ steps.validate_artifact_metadata.outputs.manifest_digest }}",
+                    deploy_section,
+                )
+                self.assertIn('[[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]', deploy_section)
+                self.assertIn('[[ "$artifact_id" != *","* ]]', deploy_section)
+                self.assertIn('[[ "$manifest_digest" =~ ^[a-f0-9]{64}$ ]]', deploy_section)
+                self.assertIn("EXPECTED_SHA: ${{ github.sha }}", deploy_section)
+                self.assertIn(
+                    f'[[ "$artifact_name" =~ ^runtime-read-{environment_name}-build-'
+                    '[1-9][0-9]*-[1-9][0-9]*-${EXPECTED_SHA}$ ]]',
+                    deploy_section,
+                )
+                self.assertIn(
+                    "printf 'artifact_id=%s\\nartifact_name=%s\\nmanifest_digest=%s\\n'",
+                    deploy_section,
+                )
+                self.assertIn("sha256sum --check --strict ../build-manifest.sha256", deploy_section)
+                self.assertIn('[[ "$EXPECTED_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]', deploy_section)
+                self.assertIn('test "$actual_manifest_digest" = "$EXPECTED_MANIFEST_DIGEST"', deploy_section)
                 self.assertNotIn("python -m unittest", deploy_section)
                 self.assertNotIn("sam build", deploy_section)
                 self.assertNotIn(SETUP_PYTHON_ACTION, deploy_section)
@@ -252,6 +312,8 @@ class DeployWorkflowTests(unittest.TestCase):
                 self.assertNotIn(SETUP_NODE_ACTION, deploy_section)
                 self.assertNotIn("tools/verify-promotion-commit.mjs", deploy_section)
                 self.assertNotIn("run-id:", deploy_section)
+                self.assertNotIn("github.run_id", deploy_section)
+                self.assertNotIn("github.run_attempt", deploy_section)
                 self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST", deploy_section)
                 self.assertIn("pullRequest.base?.repo?.full_name === repository", deploy_section)
                 self.assertIn("pullRequest.head?.repo?.full_name === repository", deploy_section)
@@ -267,8 +329,22 @@ class DeployWorkflowTests(unittest.TestCase):
                 download_end = text.index("\n      - name:", download_start)
                 self.assertNotIn("github-token:", text[download_start:download_end])
                 self.assertNotIn("run-id:", text[download_start:download_end])
+                self.assertNotIn("name: runtime-read-", text[download_start:download_end])
+
+                steps_start = text.index("\n    steps:\n", deploy_index) + len("\n    steps:\n")
+                first_step = text.index("      - ", steps_start)
+                metadata_step = text.index("      - name: Validate artifact metadata", deploy_index)
+                self.assertEqual(first_step, metadata_step)
+                self.assertLess(metadata_step, download_start)
+                setup_sam = text.index(SETUP_SAM_ACTION, deploy_index)
+                self.assertLess(download_start, setup_sam)
+
+                digest_check = text.index('test "$actual_manifest_digest" = "$EXPECTED_MANIFEST_DIGEST"', deploy_index)
+                strict_check = text.index("sha256sum --check --strict", digest_check)
+                self.assertLess(digest_check, strict_check)
 
                 github_script = text.index(GITHUB_SCRIPT_ACTION, deploy_index)
+                self.assertLess(setup_sam, github_script)
                 credentials_step = text.rfind("\n      - uses:", github_script, credentials)
                 self.assertLess(github_script, credentials)
                 final_tip_check = text.index("branch.commit.sha !== sha", github_script)
