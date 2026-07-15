@@ -174,13 +174,24 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertLess(deny_index, allow_index)
         self.assertIn("Effect: Deny", deny_statement)
         self.assertIn("s3:GetObject", deny_statement)
-        self.assertNotIn("s3:ListBucket", text)
+
+    def test_template_allows_bucket_metadata_for_missing_optional_payloads(self):
+        text = (REPO_ROOT / "template.yaml").read_text(encoding="utf-8")
+        list_bucket_statement = """            - Effect: Allow
+              Action:
+                - s3:ListBucket
+              Resource:
+                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}"""
+
+        self.assertIn(list_bucket_statement, text)
 
     def test_server_only_iam_case_boundary_and_future_hardening_are_documented(self):
         text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("case-sensitive", text)
         self.assertIn("case-insensitive application guard", text)
+        self.assertIn("403 Access Denied", text)
+        self.assertIn("404 Not Found", text)
         self.assertIn("separate public and server-only prefixes or buckets", text)
 
     def test_manual_smoke_uses_verified_test_pilot_and_documents_rendered_404(self):

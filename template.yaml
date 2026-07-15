@@ -182,6 +182,11 @@ Resources:
                 - s3:GetObject
               Resource:
                 Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/*
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+              Resource:
+                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}
             - Fn::If:
                 - HasContentHubPackagesBucket
                 - Effect: Allow
