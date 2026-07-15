@@ -183,6 +183,19 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertIn("case-insensitive application guard", text)
         self.assertIn("separate public and server-only prefixes or buckets", text)
 
+    def test_manual_smoke_uses_verified_test_pilot_and_documents_rendered_404(self):
+        text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        start = text.index("## Manual smoke test")
+        end = text.index("## Content hub runtime metadata", start)
+        smoke = text[start:end]
+
+        self.assertIn("test.zoositioweb.com.mx", smoke)
+        self.assertNotIn("test.zoolandingpage.com.mx", smoke)
+        self.assertIn("HTTP `200`", smoke)
+        self.assertIn("`metadata.statusCode` is `404`", smoke)
+        self.assertIn("`metadata.notFound` is `true`", smoke)
+        self.assertIn("does not expose a server descriptor", smoke)
+
 
 if __name__ == "__main__":
     unittest.main()
