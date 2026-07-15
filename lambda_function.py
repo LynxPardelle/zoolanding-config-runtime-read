@@ -2,7 +2,7 @@ import copy
 import os
 import re
 from typing import Any, Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from zoolanding_lambda_common import (
     alias_pk,
@@ -680,7 +680,7 @@ def _query_content_hub_metadata(hub_id: str, sk_prefix: str, environment: str) -
             if not isinstance(exclusive_start_key, dict) or not exclusive_start_key:
                 return items
     except Exception as exc:
-        log("WARNING", "Content hub public index query failed", hubId=hub_id, skPrefix=sk_prefix, error=str(exc))
+        log("WARNING", "Content hub public index query failed", hubId=hub_id, skPrefix=sk_prefix, errorType=type(exc).__name__)
         return []
 
 
@@ -725,7 +725,7 @@ def _load_content_hub_json_bundle(
     try:
         payload = load_json_from_s3(bucket_name, safe_key)
     except Exception as exc:
-        log("WARNING", "Content hub public bundle read failed", error=str(exc))
+        log("WARNING", "Content hub public bundle read failed", errorType=type(exc).__name__)
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -1266,8 +1266,33 @@ def _resolve_not_found_page_id(metadata: Dict[str, Any], site_config: Optional[D
     return str((route or {}).get("pageId") or "").strip()
 
 
+def _assert_public_runtime_payload_key(key: str) -> None:
+    decoded_key = str(key or "")
+    if not decoded_key or "\\" in decoded_key or re.search(r"[?#\x00-\x1f\x7f]", decoded_key):
+        raise ValueError("unsafe_runtime_payload_key")
+
+    for _ in range(8):
+        try:
+            next_value = unquote(decoded_key, errors="strict")
+        except UnicodeDecodeError:
+            raise ValueError("unsafe_runtime_payload_key") from None
+        if next_value == decoded_key:
+            break
+        decoded_key = next_value
+    else:
+        raise ValueError("unsafe_runtime_payload_key")
+
+    if re.search(r"%[0-9A-Fa-f]{2}", decoded_key) or "\\" in decoded_key or re.search(r"[?#\x00-\x1f\x7f]", decoded_key):
+        raise ValueError("unsafe_runtime_payload_key")
+
+    segments = [segment.casefold() for segment in decoded_key.split("/") if segment]
+    if any(segment in {".", "..", "server"} for segment in segments):
+        raise ValueError("unsafe_runtime_payload_key")
+
+
 def _load_payload(bucket: str, prefix: str, relative_path: str) -> Optional[Dict[str, Any]]:
     key = join_s3_key(prefix, relative_path)
+    _assert_public_runtime_payload_key(key)
     return load_json_from_s3(bucket, key)
 
 
@@ -1843,5 +1868,5 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             article_bundle=article_bundle if not should_render_not_found else None,
         ))
     except Exception as exc:
-        log("ERROR", "Runtime bundle read failed", requestId=request_id, domain=requested_domain, path=path, error=str(exc))
+        log("ERROR", "Runtime bundle read failed", requestId=request_id, errorType=type(exc).__name__)
         return server_error()
