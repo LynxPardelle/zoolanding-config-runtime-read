@@ -37,7 +37,7 @@ The hub owns shared frontend and authored-payload contracts. This repository own
 
 ## Release And Verification
 
-- Promotion is feature branch -> `dev` -> `test` -> `main`. Pushes to environment branches deploy; do not merge, push, or deploy without explicit approval.
+- Promotion is feature branch -> `dev` -> `test` -> `main`. Development stays local and pushes to `dev` run CI only; `dev` does not deploy AWS infrastructure. Only pushes to `test` and `main` trigger their environment-specific deployments. Do not merge, push, or deploy without explicit approval.
 - Default closeout: `python -m unittest discover -s tests -p "test_*.py"`.
 - For SAM, IAM, parameter, or workflow changes, also run `sam validate` when available and `actionlint`. Report unavailable tools; tests must not call live AWS.
 
