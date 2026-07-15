@@ -171,6 +171,12 @@ Resources:
                   Resource:
                     Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ContentHubMetadataTableNameProd}
                 - Ref: AWS::NoValue
+            - Sid: DenyServerOnlyDraftDescriptors
+              Effect: Deny
+              Action:
+                - s3:GetObject
+              Resource:
+                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/*/server/*
             - Effect: Allow
               Action:
                 - s3:GetObject
@@ -200,11 +206,6 @@ Resources:
                   Resource:
                     Fn::Sub: arn:aws:s3:::${ContentHubPackagesBucketNameProd}/content-hubs/*
                 - Ref: AWS::NoValue
-            - Effect: Allow
-              Action:
-                - s3:ListBucket
-              Resource:
-                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}
       Events:
         RuntimeBundleGet:
           Type: Api

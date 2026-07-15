@@ -1,45 +1,113 @@
 name: Deploy Production
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
 
 permissions:
-  id-token: write
   contents: read
+  pull-requests: read
+
+concurrency:
+  group: runtime-read-production-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  guard:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Require test merge
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Verify protected target branch
+        shell: bash
+        env:
+          CURRENT_REF: ${{ github.ref }}
+          TARGET_REF: refs/heads/main
         run: |
           set -euo pipefail
-          git fetch origin test main
-          parent_count="$(git rev-list --parents -n 1 HEAD | awk '{print NF-1}')"
-          test "$parent_count" -ge 2
-          second_parent="$(git rev-list --parents -n 1 HEAD | awk '{print $3}')"
-          git merge-base --is-ancestor "$second_parent" origin/test
-  deploy:
-    runs-on: ubuntu-latest
-    needs: guard
-    environment: production
-    steps:
-      - uses: actions/checkout@v5
+          if [[ "$CURRENT_REF" != "$TARGET_REF" ]]; then
+            echo "Production deploys must run from $TARGET_REF."
+            exit 1
+          fi
+
+      - name: Verify exact test-to-main merged PR
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/verify-promotion-commit.mjs --source=test --target=main
+
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
+
       - uses: aws-actions/setup-sam@v3
+
+      - name: Validate candidate
+        env:
+          LOG_LEVEL: ERROR
+        run: |
+          python -m unittest discover -s tests -p "test_*.py"
+          sam validate --lint
+          sam build --no-cached
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify validated commit identity
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - uses: aws-actions/setup-sam@v3
+
+      - name: Rebuild validated commit
+        env:
+          LOG_LEVEL: ERROR
+        run: |
+          python -m unittest discover -s tests -p "test_*.py"
+          sam validate --lint
+          sam build --no-cached
+
+      - name: Reverify exact test-to-main merged PR after rebuild
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/verify-promotion-commit.mjs --source=test --target=main
+
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-      - name: Test and deploy
-        run: |
-          python -m unittest discover -s tests -p "test_*.py"
-          sam validate
-          sam build --no-cached
-          sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset
+
+      - name: Deploy production
+        run: sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset

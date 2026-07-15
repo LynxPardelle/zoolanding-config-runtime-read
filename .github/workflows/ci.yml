@@ -43,6 +43,9 @@ jobs:
       SAM_CLI_TELEMETRY: 0
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
