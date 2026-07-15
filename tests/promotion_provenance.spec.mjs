@@ -17,7 +17,7 @@ function evidence(overrides = {}) {
     state: 'closed',
     merged_at: '2026-07-14T22:00:00Z',
     merge_commit_sha: mergeSha,
-    base: { ref: 'test', repo: { full_name: repository } },
+    base: { ref: 'test', sha: baseSha, repo: { full_name: repository } },
     head: { ref: 'dev', sha: headSha, repo: { full_name: repository } },
   };
   return {
@@ -74,6 +74,7 @@ test('accepts API 2026 associated PRs with null or absent merge_commit_sha', () 
 test('requires exact two-parent order, push predecessor, target ref, and current tip', () => {
   for (const invalid of [
     { parents: [baseSha] },
+    { pullRequests: [{ ...evidence().pullRequests[0], base: { ...evidence().pullRequests[0].base, sha: 'e'.repeat(40) } }] },
     { parents: [baseSha, 'd'.repeat(40)] },
     { event: { ...evidence().event, before: 'e'.repeat(40) } },
     { ref: 'refs/heads/main' },

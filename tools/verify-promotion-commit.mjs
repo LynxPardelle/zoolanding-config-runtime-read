@@ -23,6 +23,7 @@ function exactMergedPullRequests({ repository, sha, sourceBranch, targetBranch, 
     )
     && pullRequest.base?.ref === targetBranch
     && pullRequest.base?.repo?.full_name === repository
+    && SHA_PATTERN.test(pullRequest.base?.sha ?? '')
     && pullRequest.head?.ref === sourceBranch
     && pullRequest.head?.repo?.full_name === repository
     && SHA_PATTERN.test(pullRequest.head?.sha ?? '')
@@ -63,6 +64,7 @@ export function validatePromotionEvidence({
   if (matches.length === 0) fail('promotion_pr_not_found');
   if (matches.length !== 1) fail('promotion_pr_ambiguous');
   const pullRequest = matches[0];
+  if (parents[0] !== pullRequest.base.sha) fail('promotion_first_parent_mismatch');
   if (parents[1] !== pullRequest.head.sha) fail('promotion_second_parent_mismatch');
 
   if (eventName === 'push') {
@@ -211,11 +213,6 @@ async function main() {
     githubToken: process.env.GITHUB_TOKEN,
   });
   if (targetTipSha !== sha) fail('promotion_target_tip_mismatch');
-  if (args['tip-only'] === 'true') {
-    console.log('promotion_target_tip_verified');
-    return;
-  }
-
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) fail('promotion_event_missing');
   let event;
@@ -234,6 +231,12 @@ async function main() {
     sha,
     githubToken: process.env.GITHUB_TOKEN,
   });
+  const finalTargetTipSha = await fetchTargetBranchSha({
+    apiUrl: process.env.GITHUB_API_URL ?? 'https://api.github.com',
+    repository,
+    targetBranch: args.target,
+    githubToken: process.env.GITHUB_TOKEN,
+  });
   validatePromotionEvidence({
     repository,
     sha,
@@ -242,7 +245,7 @@ async function main() {
     targetBranch: args.target,
     eventName: process.env.GITHUB_EVENT_NAME,
     event,
-    targetTipSha,
+    targetTipSha: finalTargetTipSha,
     parents: readParents(sha),
     pullRequests,
   });
