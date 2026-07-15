@@ -45,6 +45,9 @@ Parameters:
     Default: INFO
     AllowedValues: [DEBUG, INFO, WARNING, ERROR]
     Description: Log level for the Lambda.
+  RuntimeExecutionBoundaryArn:
+    Type: String
+    Description: Retained permissions boundary owned by the Zoolanding infrastructure repository.
 
 Conditions:
   HasContentHubMetadataTable:
@@ -113,6 +116,8 @@ Resources:
       CodeUri: .build/runtime-read
       Handler: lambda_function.lambda_handler
       Description: Resolves the current site by domain and route and returns one effective runtime bundle.
+      PermissionsBoundary:
+        Ref: RuntimeExecutionBoundaryArn
       ReservedConcurrentExecutions: 100
       Environment:
         Variables:

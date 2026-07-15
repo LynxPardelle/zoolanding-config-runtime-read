@@ -16,6 +16,7 @@ parameter_overrides = [
   "ContentHubPackagesBucketName=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
   "ContentHubPackagesBucketNameTest=zoolanding-content-hub-te-contenthubpackagesbucket-gdgtasj0yb0o",
   "ContentHubPackagesBucketNameProd=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
+  "RuntimeExecutionBoundaryArn=arn:aws:iam::765932874577:policy/zoolanding-config-runtime-read-production-execution-boundary",
   "LogLevel=INFO"
 ]
 
@@ -36,6 +37,7 @@ parameter_overrides = [
   "ContentHubPackagesBucketName=zoolanding-content-hub-te-contenthubpackagesbucket-gdgtasj0yb0o",
   "ContentHubPackagesBucketNameTest=zoolanding-content-hub-te-contenthubpackagesbucket-gdgtasj0yb0o",
   "ContentHubPackagesBucketNameProd=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
+  "RuntimeExecutionBoundaryArn=arn:aws:iam::765932874577:policy/zoolanding-config-runtime-read-test-execution-boundary",
   "LogLevel=INFO"
 ]
 
@@ -56,5 +58,6 @@ parameter_overrides = [
   "ContentHubPackagesBucketName=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
   "ContentHubPackagesBucketNameTest=zoolanding-content-hub-te-contenthubpackagesbucket-gdgtasj0yb0o",
   "ContentHubPackagesBucketNameProd=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu",
+  "RuntimeExecutionBoundaryArn=arn:aws:iam::765932874577:policy/zoolanding-config-runtime-read-production-execution-boundary",
   "LogLevel=INFO"
 ]
