@@ -1,16 +1,28 @@
 import ast
+import importlib.util
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "tools" / "build_lambda_artifact.py"
 STAGED_ARTIFACT = ROOT / ".build" / "runtime-read"
 EXPECTED_RUNTIME_FILES = {"lambda_function.py", "zoolanding_lambda_common.py"}
+
+
+def load_builder_module():
+    spec = importlib.util.spec_from_file_location("runtime_read_artifact_builder", BUILDER)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("builder module could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def inventory(root: Path) -> set[str]:
@@ -65,6 +77,90 @@ class SamPackagingTests(unittest.TestCase):
                 (ROOT / relative_path).read_bytes(),
                 (STAGED_ARTIFACT / relative_path).read_bytes(),
             )
+
+    def test_unsafe_link_helper_detects_junctions_portably(self):
+        module = load_builder_module()
+        helper = getattr(module, "_is_unsafe_link", None)
+
+        self.assertIsNotNone(helper)
+        if helper is None:
+            return
+
+        junction = Mock(spec=["is_symlink", "is_junction"])
+        junction.is_symlink.return_value = False
+        junction.is_junction.return_value = True
+        self.assertTrue(helper(junction))
+
+        symlink = Mock(spec=["is_symlink"])
+        symlink.is_symlink.return_value = True
+        self.assertTrue(helper(symlink))
+
+        regular_path = Mock(spec=["is_symlink"])
+        regular_path.is_symlink.return_value = False
+        self.assertFalse(helper(regular_path))
+
+    def test_delete_containment_rejects_paths_outside_project(self):
+        module = load_builder_module()
+        containment = getattr(module, "_assert_within_project", None)
+
+        self.assertIsNotNone(containment)
+        if containment is None:
+            return
+
+        containment(ROOT / ".build" / "runtime-read")
+        with self.assertRaises(module.ArtifactError):
+            containment(ROOT.parent / "runtime-read-outside-project")
+
+    def test_mocked_junction_is_rejected_before_rmtree(self):
+        module = load_builder_module()
+        helper = getattr(module, "_is_unsafe_link", None)
+
+        self.assertIsNotNone(helper)
+        if helper is None:
+            return
+
+        with (
+            patch.object(
+                module,
+                "_is_unsafe_link",
+                side_effect=lambda path: path == module.DEFAULT_ARTIFACT,
+            ),
+            patch.object(module.shutil, "rmtree") as rmtree,
+        ):
+            with self.assertRaises(module.ArtifactError):
+                module._prepare_default_artifact()
+            rmtree.assert_not_called()
+
+    @unittest.skipUnless(
+        os.name == "nt" and hasattr(Path, "is_junction"),
+        "real directory junctions require Windows and pathlib junction support",
+    )
+    def test_verifier_rejects_a_real_windows_junction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            junction = root / "junction"
+            target.mkdir()
+            for relative_path in EXPECTED_RUNTIME_FILES:
+                shutil.copyfile(ROOT / relative_path, target / relative_path)
+
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest("Windows refused junction creation in this environment")
+
+            try:
+                self.assertTrue(junction.is_junction())
+                rejected = self.run_builder("--verify-artifact", str(junction))
+                self.assertNotEqual(0, rejected.returncode)
+                self.assertIn("unsafe", rejected.stderr)
+            finally:
+                if junction.is_junction():
+                    junction.rmdir()
 
     def test_verifier_rejects_extra_missing_or_modified_sam_function_files(self):
         result = self.run_builder()
