@@ -1,6 +1,9 @@
 import importlib
+import io
 import json
 import unittest
+from contextlib import redirect_stdout
+from urllib.parse import unquote
 
 
 class Context:
@@ -21,6 +24,26 @@ def event(host, path="/", lang="es", **query):
         "queryStringParameters": query_params,
         "requestContext": {"http": {"path": path}},
     }
+
+
+SERVER_DESCRIPTOR_FILES = (
+    "auth-profile-registry.json",
+    "integrations.json",
+    "data-spaces.json",
+    "commerce.json",
+    "integration-bindings.json",
+    "notification-policies.json",
+)
+
+
+def decoded_key_segments(key):
+    decoded = str(key).replace("\\", "/")
+    for _ in range(4):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return [segment.casefold() for segment in decoded.split("/") if segment]
 
 
 class RuntimeHandlerTest(unittest.TestCase):
@@ -239,6 +262,195 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["environment"], "test")
         self.assertEqual(body["versionId"], "test-v1")
         self.assertTrue(any(key.startswith("test-prefix/") for key in self.loaded_keys))
+
+    def test_runtime_payload_loader_rejects_every_server_descriptor_path_before_s3(self):
+        path_templates = (
+            "pamelabetancourt.com/server/{name}",
+            "pamelabetancourt.com/SERVER/{name}",
+            "pamelabetancourt.com/%73erver/{name}",
+            "pamelabetancourt.com/%2573erver/{name}",
+            "pamelabetancourt.com/public/../server/{name}",
+            "pamelabetancourt.com/public/%2e%2e/%73erver/{name}",
+            "pamelabetancourt.com\\server\\{name}",
+            "pamelabetancourt.com/server/{name}?download=1",
+        )
+
+        for descriptor_name in SERVER_DESCRIPTOR_FILES:
+            for template in path_templates:
+                relative_path = template.format(name=descriptor_name)
+                with self.subTest(relative_path=relative_path):
+                    self.loaded_keys.clear()
+                    with self.assertRaisesRegex(ValueError, "unsafe_runtime_payload_key"):
+                        self.handler._load_payload("runtime-bucket", "test-prefix", relative_path)
+                    self.assertEqual(self.loaded_keys, [])
+
+    def test_runtime_bundle_rejects_server_segments_from_page_lang_domain_and_paths(self):
+        cases = (
+            {
+                "name": "query-page-id",
+                "route_path": "/admin",
+                "page_id": "server",
+                "request": event("api.zoolandingpage.com.mx", path="/admin", domain="pamelabetancourt.com", environment="test"),
+            },
+            {
+                "name": "encoded-page-id-and-query-path",
+                "route_path": "/server%2Fintegrations.json",
+                "page_id": "%73erver/private-customer-marker",
+                "request": event(
+                    "api.zoolandingpage.com.mx",
+                    path="/server%2Fintegrations.json",
+                    domain="pamelabetancourt.com",
+                    environment="test",
+                ),
+            },
+            {
+                "name": "double-encoded-page-id-and-raw-path",
+                "route_path": "/raw-admin",
+                "page_id": "%2573erver/private-customer-marker",
+                "request": {
+                    "headers": {"host": "api.zoolandingpage.com.mx"},
+                    "queryStringParameters": {"domain": "pamelabetancourt.com", "environment": "test", "lang": "es"},
+                    "rawPath": "/raw-admin",
+                    "requestContext": {"http": {"path": "/raw-admin"}},
+                },
+            },
+            {
+                "name": "traversal-page-id",
+                "route_path": "/public/../server/commerce.json",
+                "page_id": "public/../server/private-customer-marker",
+                "request": event(
+                    "api.zoolandingpage.com.mx",
+                    path="/public/../server/commerce.json",
+                    domain="pamelabetancourt.com",
+                    environment="test",
+                ),
+            },
+            {
+                "name": "backslash-page-id",
+                "route_path": "/backslash",
+                "page_id": "public\\server\\private-customer-marker",
+                "request": event("api.zoolandingpage.com.mx", path="/backslash", domain="pamelabetancourt.com", environment="test"),
+            },
+            {
+                "name": "lang-traversal",
+                "route_path": "/",
+                "page_id": "default",
+                "request": event(
+                    "api.zoolandingpage.com.mx",
+                    path="/",
+                    lang="%252e%252e%252f%2573erver%252fintegrations",
+                    domain="pamelabetancourt.com",
+                    environment="test",
+                ),
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                self.loaded_keys.clear()
+                self.metadata["routes"] = [{"path": case["route_path"], "pageId": case["page_id"]}]
+                site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+                site_config["routes"] = [{"path": case["route_path"], "pageId": case["page_id"]}]
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    response = self.handler.lambda_handler(case["request"], Context())
+                serialized = f"{response['body']}\n{output.getvalue()}"
+
+                self.assertEqual(response["statusCode"], 500)
+                self.assertNotIn("private-customer-marker", serialized)
+                self.assertNotIn("credential-value-marker", serialized)
+                self.assertFalse(
+                    any("server" in decoded_key_segments(key) for key in self.loaded_keys),
+                    self.loaded_keys,
+                )
+
+    def test_runtime_bundle_rejects_encoded_server_domain_and_ignores_invalid_environment(self):
+        domain_variants = (
+            "tenant.example/server",
+            "tenant.example/SERVER",
+            "tenant.example/%73erver",
+            "tenant.example/%2573erver",
+            "tenant.example/public/../server",
+            "tenant.example\\server",
+        )
+        environment_variants = ("server", "%73erver", "%2573erver", "../server", "..\\server")
+
+        for domain_variant in domain_variants:
+            malicious_metadata = dict(self.metadata)
+            malicious_metadata["published"] = {"versionId": "prod-v1", "prefix": "prod-prefix"}
+            self.items[(f"SITE#{domain_variant.casefold()}", "METADATA")] = malicious_metadata
+            with self.subTest(domain=domain_variant):
+                self.loaded_keys.clear()
+                response = self.handler.lambda_handler(event("api.zoolandingpage.com.mx", domain=domain_variant), Context())
+                self.assertEqual(response["statusCode"], 500)
+                self.assertFalse(
+                    any("server" in decoded_key_segments(key) for key in self.loaded_keys),
+                    self.loaded_keys,
+                )
+
+        for environment_variant in environment_variants:
+            with self.subTest(environment=environment_variant):
+                self.loaded_keys.clear()
+                response = self.handler.lambda_handler(
+                    event("api.zoolandingpage.com.mx", domain="pamelabetancourt.com", environment=environment_variant),
+                    Context(),
+                )
+                self.assertEqual(response["statusCode"], 200)
+                self.assertEqual(parse(response)["environment"], "production")
+                self.assertFalse(any("server" in decoded_key_segments(key) for key in self.loaded_keys))
+
+    def test_runtime_error_does_not_echo_request_or_exception_data(self):
+        def fail_resolution(_domain):
+            raise RuntimeError("credential-value-marker")
+
+        self.handler._resolve_site_metadata = fail_resolution
+        output = io.StringIO()
+        request = event(
+            "api.zoolandingpage.com.mx",
+            path="/private-customer-marker",
+            domain="private-customer-marker.example",
+            environment="test",
+        )
+
+        with redirect_stdout(output):
+            response = self.handler.lambda_handler(request, Context())
+
+        body = parse(response)
+        serialized = f"{response['body']}\n{output.getvalue()}"
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(body, {"ok": False, "error": "Internal error"})
+        self.assertNotIn("private-customer-marker", serialized)
+        self.assertNotIn("credential-value-marker", serialized)
+
+    def test_content_hub_storage_errors_do_not_echo_exception_data(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
+        self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
+
+        def fail_table(_table_name):
+            raise RuntimeError("private-customer-marker")
+
+        def fail_s3(_bucket, _key):
+            raise RuntimeError("credential-value-marker")
+
+        self.handler.get_table = fail_table
+        self.handler.load_json_from_s3 = fail_s3
+        output = io.StringIO()
+        with redirect_stdout(output):
+            items = self.handler._query_content_hub_metadata("main", "ARTICLE#", "test")
+            bundle = self.handler._load_content_hub_json_bundle(
+                "content-hubs/test/main/published/pamelabetancourt.com/es/article-1/revision-1/bundle.json",
+                "test",
+                "main",
+                "pamelabetancourt.com",
+                "es",
+                "article-1",
+            )
+
+        serialized = output.getvalue()
+        self.assertEqual(items, [])
+        self.assertIsNone(bundle)
+        self.assertNotIn("private-customer-marker", serialized)
+        self.assertNotIn("credential-value-marker", serialized)
 
     def test_parameterized_category_route_resolves_page_payload(self):
         self.metadata["routes"].append({"path": "/blog/:categorySlug", "pageId": "blog-category"})

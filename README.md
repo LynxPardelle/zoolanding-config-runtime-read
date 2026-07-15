@@ -61,11 +61,12 @@ For SAM, IAM, parameter, or workflow changes, also run `sam validate` when SAM i
 
 ## Deploy
 
-Pushes to `dev`, `test`, and `main` trigger AWS deployment workflows. Use the workflow-guarded promotion path feature branch -> `dev` -> `test` -> `main`, and do not merge or deploy without explicit approval for the target environment. Plain `sam deploy` uses the default production-oriented profile; do not use it for exploratory validation.
+Pushes to `dev` run CI only and do not deploy AWS infrastructure. Pushes to `test` and `main` trigger their environment-specific AWS deployment workflows. Use the workflow-guarded promotion path feature branch -> `dev` -> `test` -> `main`, and do not merge or deploy without explicit approval for the target environment. Plain `sam deploy` uses the default production-oriented profile; do not use it for exploratory validation.
 
-The checked-in `samconfig.toml` includes `dev`, `test`, and `prod` deployment profiles in `us-east-1`.
+Test and production deployment workflows serialize the entire run by environment and Git ref. They do not cancel an in-progress run, because cancellation could interrupt a CloudFormation operation after it has started mutating infrastructure. Exact merged-PR provenance is checked before validation and checked again in full after the privileged job rebuilds the candidate, immediately before AWS credentials are obtained; the second check repeats repository, source/base branch, parent order, event predecessor, and current target-tip validation.
 
-- `dev` uses `zoolanding-config-registry-dev` and `zoolanding-config-payloads-dev`.
+The checked-in `samconfig.toml` has no `dev` deployment profile. Its named deployment profiles are `test` and `prod` in `us-east-1`.
+
 - `test` uses `zoolanding-config-registry-test` and `zoolanding-config-payloads-test`.
 - `prod` uses the existing production table and bucket names.
 
@@ -87,9 +88,23 @@ https://y84vk0v44l.execute-api.us-east-1.amazonaws.com/Prod/runtime-bundle
 
 ## Manual smoke test
 
-```bash
-curl "https://your-api-id.execute-api.us-east-1.amazonaws.com/Prod/runtime-bundle?domain=test.zoolandingpage.com.mx&path=/&lang=es"
+The currently verified test pilot is the authored alias `test.zoositioweb.com.mx`. Keep the response body in memory and print only the contract fields:
+
+```powershell
+$publicResponse = Invoke-WebRequest "https://your-api-id.execute-api.us-east-1.amazonaws.com/Prod/runtime-bundle?domain=test.zoositioweb.com.mx&path=/&lang=es"
+$publicPayload = $publicResponse.Content | ConvertFrom-Json
+[pscustomobject]@{
+  httpStatus = [int]$publicResponse.StatusCode
+  metadataStatus = $publicPayload.metadata.statusCode
+  notFound = $publicPayload.metadata.notFound
+  hasSiteConfig = $null -ne $publicPayload.siteConfig
+  hasPageConfig = $null -ne $publicPayload.pageConfig
+}
 ```
+
+The public home smoke must return HTTP `200`, `metadata.statusCode` `200`, `metadata.notFound` `false`, and both config flags `true`.
+
+`/server/*` is not a backend descriptor route. For the verified pilot, a request such as `path=%2Fserver%2Fintegrations.json` returns an HTTP `200` public not-found bundle whose `metadata.statusCode` is `404`, whose `metadata.notFound` is `true`, and whose route is `/404`; it does not expose a server descriptor. Inspect only those fields and never print or persist the full response during an operational smoke.
 
 The request also works without the `domain` query string when the API receives a `Host` or `X-Forwarded-Host` header that matches a configured site or an authored alias.
 
@@ -98,6 +113,16 @@ Runtime requests can use `environment=dev` or `environment=test` on canonical-do
 ## Content hub runtime metadata
 
 When `site-config.json` includes `contentHubs`, the runtime bundle includes a safe projection under `metadata.contentHubs`. The projection is allowlisted to `hubId`, `name`, `defaultLanguage`, `canonicalDraftDomain`, `allowedDraftDomains`, and `articleIds`; arbitrary nested authoring fields are not exposed.
+
+## Server-only package boundary
+
+A published draft package may contain backend policy under `server/` for services such as Auth Admin, API Proxy, Data Spaces, Commerce, Integrations, and Notifications. Runtime Read must never request or return those descriptors. The current descriptor contract is documented in the hub [server-only integration foundation](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/api-driven-config/22-server-only-integration-microservices.md).
+
+Every config-bucket object key is checked before the S3 request. Validation repeatedly decodes percent-encoded input and rejects dot segments, backslashes, query or fragment delimiters, control characters, encoded residue, and any case-insensitive path segment named `server`. This directory-level deny remains effective when new descriptor filenames are added.
+
+The Lambda role also has an explicit `s3:GetObject` deny for canonical lowercase `*/server/*` objects before its bucket-wide read allow, and it does not have `s3:ListBucket`. S3 object keys and IAM resource matching are case-sensitive, so that IAM deny is defense in depth for canonical authoring output; the case-insensitive application guard remains responsible for alternate casing and encoded variants before S3. A future split into separate public and server-only prefixes or buckets could narrow the allow itself, but requires coordinated authoring and migration work and is not part of this change.
+
+Rejected or unexpected runtime reads return the generic `500` error contract. Error logs retain the Lambda request ID and exception type, but omit raw domain, path, exception message, descriptor content, credentials, and customer data.
 
 ## Required data shape
 
