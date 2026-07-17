@@ -1,7 +1,7 @@
 import copy
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 from urllib.parse import unquote, urlparse
 
 from zoolanding_lambda_common import (
@@ -35,19 +35,68 @@ CONTENT_HUB_METADATA_TABLE_NAME_PROD = os.getenv("CONTENT_HUB_METADATA_TABLE_NAM
 CONTENT_HUB_PACKAGES_BUCKET_NAME = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME", "").strip()
 CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST", "").strip()
 CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD", "").strip()
+CONTENT_HUB_QUERY_PAGE_SIZE = 200
+CONTENT_HUB_QUERY_MAX_PAGES = 2
+CONTENT_HUB_QUERY_MAX_ITEMS = CONTENT_HUB_QUERY_PAGE_SIZE * CONTENT_HUB_QUERY_MAX_PAGES
+CONTENT_HUB_MAX_HUBS_PER_REQUEST = 4
 SAFE_CONTENT_HUB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-CONTENT_HUB_SECRET_KEY_RE = re.compile(
-    r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|credential[_-]?ref|"
-    r"secret[_-]?ref|private[_-]?key|server[_-]?policy|table[_-]?name|bucket[_-]?name|"
-    r"lambda[_-]?arn|groups[_-]?to[_-]?roles|authorization[_-]?decision|signed[_-]?url|"
-    r"tenant[_-]?id|aws[_-]?secret|aws[_-]?access)",
-    re.I,
+PUBLIC_SENSITIVE_SAFE_KEY_CONTEXTS = {
+    "mfaSoftwareTokenEnabled": (("runtime_data_source", "mapper", "fields"),),
+    "piiPolicy": (("runtime_content_hub", "analytics_context"),),
+    "csrfCookieName": (("runtime_auth", "session"),),
+    "challengeCsrfCookieName": (("runtime_auth", "session"),),
+    "mfaEnrollCsrfCookieName": (("runtime_auth", "session"),),
+    "csrfHeaderName": (("runtime_auth", "session"),),
+}
+PUBLIC_SENSITIVE_KEY_SEGMENTS = frozenset({
+    "token", "secret", "credential", "credentials", "password", "passphrase",
+    "authorization", "rfc", "curp", "clabe", "cvv", "cvc", "pii",
+})
+PUBLIC_SENSITIVE_KEY_PHRASES = (
+    "api_key", "private_key", "private_data", "server_only", "server_policy",
+    "internal_policy", "auth_header", "upstream_headers", "table_name", "bucket_name",
+    "lambda_arn", "groups_to_roles", "signed_url", "tenant_id", "customer_tax_id",
+    "customer_rfc", "customer_curp", "tax_id", "bank_account", "bank_clabe",
+    "routing_number", "card_number", "aws_secret", "aws_access", "csrf_cookie_name",
+    "challenge_csrf_cookie_name", "mfa_enroll_csrf_cookie_name", "csrf_header_name",
 )
+PUBLIC_SENSITIVE_COLLAPSED_KEY_FRAGMENTS = frozenset(
+    phrase.replace("_", "")
+    for phrase in PUBLIC_SENSITIVE_KEY_PHRASES
+) | frozenset({
+    "token", "secret", "credential", "credentials", "password", "passphrase",
+    "authorization", "rfc", "curp", "clabe", "cvv", "cvc", "pii",
+})
 CONTENT_HUB_UNSAFE_VALUE_RE = re.compile(
     r"(?:javascript:|data:|X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|"
     r"AWSAccessKeyId=|Signature=|Expires=|ssm:/|secretsmanager:/)",
     re.I,
 )
+_PUBLIC_VALUE_BLOCKED = object()
+
+
+def _normalized_public_key_name(value: Any) -> str:
+    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", str(value or ""))
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()
+
+
+def _is_sensitive_public_key(value: Any, parent_path: tuple[str, ...] = ()) -> bool:
+    raw_key = str(value or "")
+    normalized = _normalized_public_key_name(value)
+    if not normalized:
+        return False
+    safe_contexts = PUBLIC_SENSITIVE_SAFE_KEY_CONTEXTS.get(raw_key, ())
+    if parent_path in safe_contexts:
+        return False
+    segments = frozenset(segment for segment in normalized.split("_") if segment)
+    if segments.intersection(PUBLIC_SENSITIVE_KEY_SEGMENTS):
+        return True
+    padded = f"_{normalized}_"
+    if any(f"_{phrase}_" in padded for phrase in PUBLIC_SENSITIVE_KEY_PHRASES):
+        return True
+    collapsed = normalized.replace("_", "")
+    return any(fragment in collapsed for fragment in PUBLIC_SENSITIVE_COLLAPSED_KEY_FRAGMENTS)
 
 
 def _is_record(value: Any) -> bool:
@@ -191,7 +240,7 @@ def _public_content_hubs(metadata: Dict[str, Any]) -> list[Dict[str, Any]]:
         return []
 
     public_hubs: list[Dict[str, Any]] = []
-    for raw_hub in raw_hubs:
+    for raw_hub in raw_hubs[:CONTENT_HUB_MAX_HUBS_PER_REQUEST]:
         if not isinstance(raw_hub, dict):
             continue
         hub_id = str(raw_hub.get("hubId") or "").strip()
@@ -297,26 +346,56 @@ def _mojibake_score(text: str) -> int:
     return sum(text.count(marker) for marker in ("Ã", "Â", "â"))
 
 
-def _public_content_hub_payload(value: Any) -> Any:
+def _public_content_hub_payload(value: Any, parent_path: tuple[str, ...] = ()) -> Any:
     if isinstance(value, dict):
         output: Dict[str, Any] = {}
         for key, entry in value.items():
-            if CONTENT_HUB_SECRET_KEY_RE.search(str(key)):
+            normalized_key = _normalized_public_key_name(key)
+            if _is_sensitive_public_key(key, parent_path):
                 continue
-            sanitized = _public_content_hub_payload(entry)
-            if sanitized is not None:
+            sanitized = _public_content_hub_payload(entry, parent_path + (normalized_key,))
+            if sanitized is not _PUBLIC_VALUE_BLOCKED:
                 output[key] = sanitized
         return output
     if isinstance(value, list):
         output = []
         for entry in value:
-            sanitized = _public_content_hub_payload(entry)
-            if sanitized is not None:
+            sanitized = _public_content_hub_payload(entry, parent_path)
+            if sanitized is not _PUBLIC_VALUE_BLOCKED:
                 output.append(sanitized)
         return output
     if isinstance(value, str) and CONTENT_HUB_UNSAFE_VALUE_RE.search(value):
-        return None
+        return _PUBLIC_VALUE_BLOCKED
     return value
+
+
+def _project_public_object(
+    value: Any,
+    allowed_keys: Iterable[str],
+    *,
+    base_path: tuple[str, ...] = (),
+) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    projected = {
+        key: value[key]
+        for key in allowed_keys
+        if key in value
+    }
+    sanitized = _public_content_hub_payload(projected, base_path)
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _runtime_content_hubs(site_config: Optional[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
+    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
+    if not isinstance(hubs, list):
+        return []
+    return [
+        hub
+        for hub in hubs[:CONTENT_HUB_MAX_HUBS_PER_REQUEST]
+        if isinstance(hub, dict)
+    ]
 
 
 def _safe_content_hub_timestamp(value: Any) -> str:
@@ -663,22 +742,29 @@ def _query_content_hub_metadata(hub_id: str, sk_prefix: str, environment: str) -
         return []
     items: list[Dict[str, Any]] = []
     exclusive_start_key: Optional[Dict[str, Any]] = None
+    pages = 0
     try:
-        while True:
+        while pages < CONTENT_HUB_QUERY_MAX_PAGES and len(items) < CONTENT_HUB_QUERY_MAX_ITEMS:
+            remaining = CONTENT_HUB_QUERY_MAX_ITEMS - len(items)
             request: Dict[str, Any] = {
                 "KeyConditionExpression": "pk = :pk AND begins_with(sk, :sk)",
                 "ExpressionAttributeValues": {":pk": f"HUB#{hub_id}", ":sk": sk_prefix},
-                "Limit": 200,
+                "Limit": min(CONTENT_HUB_QUERY_PAGE_SIZE, remaining),
             }
             if exclusive_start_key:
                 request["ExclusiveStartKey"] = exclusive_start_key
             response = get_table(table_name).query(**request)
+            pages += 1
             page_items = response.get("Items")
             if isinstance(page_items, list):
-                items.extend(page_items)
+                items.extend(page_items[:remaining])
+            if len(items) >= CONTENT_HUB_QUERY_MAX_ITEMS:
+                return items
             exclusive_start_key = response.get("LastEvaluatedKey")
             if not isinstance(exclusive_start_key, dict) or not exclusive_start_key:
                 return items
+        # ponytail: replace this bounded index with a precomputed paginated index only when a hub needs more than 400 items.
+        return items
     except Exception as exc:
         log("WARNING", "Content hub public index query failed", hubId=hub_id, skPrefix=sk_prefix, errorType=type(exc).__name__)
         return []
@@ -700,6 +786,21 @@ def _load_content_hub_slug_pointer(
         f"SLUG#{_content_hub_environment_segment(environment)}#{render_domain}#{locale}",
         f"PATH#{safe_path}",
     )
+    return item if isinstance(item, dict) else None
+
+
+def _load_content_hub_article_metadata(
+    *,
+    environment: str,
+    hub_id: str,
+    article_id: str,
+) -> Optional[Dict[str, Any]]:
+    table_name = _content_hub_table_name(environment)
+    safe_hub_id = _safe_content_hub_id(hub_id)
+    safe_article_id = _safe_content_hub_id(article_id)
+    if not table_name or not safe_hub_id or not safe_article_id:
+        return None
+    item = load_item(table_name, f"HUB#{safe_hub_id}", f"ARTICLE#{safe_article_id}")
     return item if isinstance(item, dict) else None
 
 
@@ -763,9 +864,8 @@ def _content_hub_bundle_for_path(
 ) -> Optional[Dict[str, Any]]:
     if not isinstance(site_config, dict) or not _content_hub_table_name(environment) or not _content_hub_packages_bucket_name(environment):
         return None
-    runtime = site_config.get("runtime")
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list):
+    hubs = _runtime_content_hubs(site_config)
+    if not hubs:
         return None
 
     normalized_path = normalize_route_path(path)
@@ -779,20 +879,40 @@ def _content_hub_bundle_for_path(
         if not hub_id:
             continue
         locale = _content_hub_locale(hub, lang)
-        for item in _query_content_hub_metadata(hub_id, "ARTICLE#", environment):
-            article = _content_hub_article_summary(item, hub, locale)
-            if not article or _safe_content_hub_path(article.get("path")) != normalized_path:
+        public_articles = hub.get("publicArticles") if isinstance(hub.get("publicArticles"), list) else []
+        for article in public_articles:
+            if not isinstance(article, dict) or _safe_content_hub_path(article.get("path")) != normalized_path:
                 continue
             article_id = _safe_content_hub_id(article.get("articleId"))
-            slug_pointer = _load_content_hub_slug_pointer(
+            if not article_id:
+                continue
+            item = _load_content_hub_article_metadata(
                 environment=environment,
+                hub_id=hub_id,
+                article_id=article_id,
+            )
+            item_summary = _content_hub_article_summary(item, hub, locale) if isinstance(item, dict) else None
+            if not item_summary or _safe_content_hub_path(item_summary.get("path")) != normalized_path:
+                continue
+            bundle_key = str(item.get("publishedBundleKey") or "")
+            if not _safe_content_hub_bundle_key(
+                bundle_key,
+                environment=environment,
+                hub_id=hub_id,
                 render_domain=render_domain,
                 locale=locale,
-                path=normalized_path,
-            )
-            slug_article_id = _safe_content_hub_id((slug_pointer or {}).get("articleId"))
+                article_id=article_id,
+            ):
+                slug_pointer = _load_content_hub_slug_pointer(
+                    environment=environment,
+                    render_domain=render_domain,
+                    locale=locale,
+                    path=normalized_path,
+                )
+                slug_article_id = _safe_content_hub_id((slug_pointer or {}).get("articleId"))
+                bundle_key = str((slug_pointer or {}).get("publishedBundleKey") or "") if slug_article_id == article_id else ""
             bundle = _load_content_hub_json_bundle(
-                str(item.get("publishedBundleKey") or ((slug_pointer or {}).get("publishedBundleKey") if slug_article_id == article_id else "")),
+                bundle_key,
                 environment,
                 hub_id,
                 render_domain,
@@ -865,12 +985,12 @@ def _content_hub_taxonomy_from_articles(articles: list[Dict[str, Any]], locale: 
 def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], lang: str, environment: str) -> Optional[Dict[str, Any]]:
     if not isinstance(site_config, dict) or not _content_hub_table_name(environment):
         return site_config
-    runtime = site_config.get("runtime")
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list):
+    hubs = _runtime_content_hubs(site_config)
+    if not hubs:
         return site_config
 
     enriched = copy.deepcopy(site_config)
+    enriched["runtime"]["contentHubs"] = copy.deepcopy(hubs)
     enriched_hubs = enriched["runtime"]["contentHubs"]
     for hub in enriched_hubs:
         if not isinstance(hub, dict):
@@ -924,11 +1044,7 @@ def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], la
 
 
 def _content_hub_public_variables(site_config: Optional[Dict[str, Any]], path: str) -> Optional[Dict[str, Any]]:
-    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list) or not hubs:
-        return None
-    valid_hubs = [entry for entry in hubs if isinstance(entry, dict)]
+    valid_hubs = _runtime_content_hubs(site_config)
     if not valid_hubs:
         return None
     articles = [
@@ -998,9 +1114,8 @@ def _content_hub_base_path(hub: Dict[str, Any]) -> str:
 
 
 def _content_hub_taxonomy_route(site_config: Optional[Dict[str, Any]], path: str) -> Optional[Dict[str, Any]]:
-    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list):
+    hubs = _runtime_content_hubs(site_config)
+    if not hubs:
         return None
 
     normalized_path = normalize_route_path(path)
@@ -1063,9 +1178,8 @@ def _route_pattern_matches(pattern: Any, path: str) -> bool:
 
 
 def _is_content_hub_article_path(site_config: Optional[Dict[str, Any]], path: str) -> bool:
-    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list):
+    hubs = _runtime_content_hubs(site_config)
+    if not hubs:
         return False
     for hub in hubs:
         if not isinstance(hub, dict):
@@ -1208,14 +1322,264 @@ def _merge_content_hub_bundle_page_config_seo(
     return enriched
 
 
+def _public_route(route: Any) -> Optional[Dict[str, Any]]:
+    projected = _project_public_object(route, ("path", "pageId", "label", "labelKey", "auth"))
+    if not projected:
+        return None
+    if isinstance(route, dict) and "auth" in route:
+        auth = _project_public_object(route.get("auth"), ("required", "allowedGroups", "redirectTo"))
+        if auth:
+            projected["auth"] = auth
+        else:
+            projected.pop("auth", None)
+    return projected
+
+
+def _public_lifecycle(lifecycle: Any) -> Dict[str, Any]:
+    return _project_public_object(
+        lifecycle,
+        (
+            "status", "fallbackMode", "fallbackPageId", "fallbackDomain", "fallbackUrl",
+            "message", "reason", "supportEmail", "supportPhone", "updatedAt",
+        ),
+    )
+
+
+def _project_runtime_auth(value: Any) -> Dict[str, Any]:
+    auth = _project_public_object(
+        value,
+        (
+            "enabled", "authProfileId", "provider", "issuer", "userPoolId", "clientId",
+            "hostedUiDomain", "scopes", "redirectPath", "logoutPath", "loginPath",
+            "loginPageId", "logoutPageId", "callbackPageId", "accountPageId", "postLoginPath",
+            "postLogoutPath", "groupsClaim", "allowedGroups", "session", "admin",
+        ),
+        base_path=("runtime_auth",),
+    )
+    if not isinstance(value, dict):
+        return auth
+    if "session" in value:
+        session = _project_public_object(
+            value.get("session"),
+            (
+                "mode", "signinPath", "mePath", "logoutPath", "challengeRespondPath",
+                "mfaSetupPath", "mfaVerifyPath", "mfaEnrollStartPath", "mfaEnrollVerifyPath",
+                "mfaDisablePath", "csrfCookieName", "challengeCsrfCookieName",
+                "mfaEnrollCsrfCookieName", "csrfHeaderName", "routeAccessCacheMs",
+            ),
+            base_path=("runtime_auth", "session"),
+        )
+        if session:
+            auth["session"] = session
+        else:
+            auth.pop("session", None)
+    if "admin" in value:
+        admin = _project_public_object(
+            value.get("admin"),
+            (
+                "usersPath", "approveUserPathTemplate", "groupsPathTemplate",
+                "suspendUserPathTemplate", "reactivateUserPathTemplate", "resetUserMfaPathTemplate",
+            ),
+            base_path=("runtime_auth", "admin"),
+        )
+        if admin:
+            auth["admin"] = admin
+        else:
+            auth.pop("admin", None)
+    return auth
+
+
+def _project_runtime_data_source(value: Any) -> Dict[str, Any]:
+    projected = _project_public_object(
+        value,
+        (
+            "id", "kind", "proxySourceId", "authAdminSource", "contentHub", "comboCatalog",
+            "target", "statusTarget", "mergeMode", "clearTargetOnLoad", "enabled", "ssr",
+            "pageIds", "requiredInputKeys", "skipWhenQueryParams", "input", "mapper", "refresh",
+        ),
+        base_path=("runtime_data_source",),
+    )
+    if not isinstance(value, dict):
+        return projected
+    nested_allowlists = {
+        "contentHub": (
+            "read", "hubId", "articleId", "language", "revisionId", "taxonomyId",
+            "taxonomyKind", "assetId", "commentId", "scheduleId",
+        ),
+        "comboCatalog": ("read",),
+        "mapper": ("itemsPath", "singleItem", "prependItems", "fields", "metaFields"),
+        "refresh": ("mode", "intervalMs"),
+    }
+    for key, allowed_keys in nested_allowlists.items():
+        if key not in value or value.get(key) is None:
+            continue
+        nested = _project_public_object(
+            value.get(key),
+            allowed_keys,
+            base_path=("runtime_data_source", _normalized_public_key_name(key)),
+        )
+        if nested:
+            projected[key] = nested
+        else:
+            projected.pop(key, None)
+    return projected
+
+
+def _project_runtime_api_action(value: Any) -> Dict[str, Any]:
+    projected = _project_public_object(
+        value,
+        (
+            "id", "kind", "proxyActionId", "authAdminAction", "contentHub", "comboCatalog",
+            "method", "statusTarget", "enabled", "inputFields", "requiresUserGesture",
+        ),
+    )
+    if not isinstance(value, dict):
+        return projected
+    nested_allowlists = {
+        "contentHub": (
+            "action", "hubId", "articleId", "language", "revisionId", "taxonomyId",
+            "taxonomyKind", "assetId", "commentId", "scheduleId",
+        ),
+        "comboCatalog": ("action",),
+    }
+    for key, allowed_keys in nested_allowlists.items():
+        if key not in value:
+            continue
+        nested = _project_public_object(value.get(key), allowed_keys)
+        if nested:
+            projected[key] = nested
+        else:
+            projected.pop(key, None)
+    return projected
+
+
+def _project_public_runtime(runtime: Any) -> Dict[str, Any]:
+    if not isinstance(runtime, dict):
+        return {}
+    public_runtime: Dict[str, Any] = {}
+    simple_objects = {
+        "localStorage": (
+            "theme", "language", "userPreferences", "id", "sessionId", "allowAnalytics",
+            "analyticsConsentSnooze", "adAttribution", "pageViewCount",
+        ),
+        "features": ("debugMode",),
+        "analytics": (
+            "enabled", "consentUI", "consentSnoozeSeconds", "events", "categories",
+            "quickStats", "googleTag", "track",
+        ),
+        "authRemote": ("enabled", "authProfileId", "endpoint"),
+        "comboCatalog": ("enabled", "endpoint", "authProfileId", "draftDomain"),
+    }
+    for key, allowed_keys in simple_objects.items():
+        if key in runtime:
+            value = _project_public_object(runtime.get(key), allowed_keys)
+            if value:
+                public_runtime[key] = value
+
+    if "navigation" in runtime:
+        navigation = _project_public_object(runtime.get("navigation"), ("scrollRestoration",))
+        raw_scroll = runtime.get("navigation", {}).get("scrollRestoration") if isinstance(runtime.get("navigation"), dict) else None
+        if raw_scroll is not None:
+            scroll = _project_public_object(raw_scroll, ("mode", "top", "left", "behavior"))
+            if scroll:
+                navigation["scrollRestoration"] = scroll
+            else:
+                navigation.pop("scrollRestoration", None)
+        if navigation:
+            public_runtime["navigation"] = navigation
+
+    if "auth" in runtime:
+        auth = _project_runtime_auth(runtime.get("auth"))
+        if auth:
+            public_runtime["auth"] = auth
+
+    hubs = [
+        _project_public_object(
+            hub,
+            (
+                "hubId", "ownerDraftDomain", "source", "routeBasePath", "listPath",
+                "articlePathPattern", "defaultLocale", "locales", "canonicalMode", "runtimeSourceId",
+                "publicApiBasePath", "analyticsContext", "publicArticles", "publicTaxonomy",
+            ),
+            base_path=("runtime_content_hub",),
+        )
+        for hub in runtime.get("contentHubs", [])[:CONTENT_HUB_MAX_HUBS_PER_REQUEST]
+        if isinstance(hub, dict)
+    ] if isinstance(runtime.get("contentHubs"), list) else []
+    if hubs:
+        public_runtime["contentHubs"] = hubs
+
+    data_sources = [
+        projected
+        for item in (runtime.get("dataSources") if isinstance(runtime.get("dataSources"), list) else [])
+        for projected in [_project_runtime_data_source(item)]
+        if projected
+    ]
+    if data_sources:
+        public_runtime["dataSources"] = data_sources
+
+    api_actions = [
+        projected
+        for item in (runtime.get("apiActions") if isinstance(runtime.get("apiActions"), list) else [])
+        for projected in [_project_runtime_api_action(item)]
+        if projected
+    ]
+    if api_actions:
+        public_runtime["apiActions"] = api_actions
+    return public_runtime
+
+
 def _public_site_config(site_config: Dict[str, Any]) -> Dict[str, Any]:
-    public_config = copy.deepcopy(site_config)
-    if isinstance(public_config.get("contentHubs"), list):
-        public_hubs = _public_content_hubs(public_config)
+    public_config: Dict[str, Any] = {}
+    for key in ("version", "domain", "aliases", "defaultPageId", "notFoundPageId", "defaults"):
+        if key not in site_config:
+            continue
+        sanitized = _public_content_hub_payload(site_config[key])
+        if sanitized is not _PUBLIC_VALUE_BLOCKED:
+            public_config[key] = sanitized
+
+    if isinstance(site_config.get("environments"), dict):
+        environments = {
+            name: projected
+            for name, value in site_config["environments"].items()
+            if not _is_sensitive_public_key(name)
+            for projected in [_project_public_object(value, ("aliases",))]
+            if projected
+        }
+        if environments:
+            public_config["environments"] = environments
+
+    if isinstance(site_config.get("routes"), list):
+        routes = [projected for route in site_config["routes"] for projected in [_public_route(route)] if projected]
+        public_config["routes"] = routes
+
+    if "sitemap" in site_config:
+        sitemap = _project_public_object(site_config.get("sitemap"), ("urls", "excludePaths"))
+        if sitemap:
+            public_config["sitemap"] = sitemap
+
+    if "lifecycle" in site_config:
+        lifecycle = _public_lifecycle(site_config.get("lifecycle"))
+        if lifecycle:
+            public_config["lifecycle"] = lifecycle
+
+    if "runtime" in site_config:
+        runtime = _project_public_runtime(site_config.get("runtime"))
+        if runtime:
+            public_config["runtime"] = runtime
+
+    if "site" in site_config:
+        site = _project_public_object(
+            site_config.get("site"),
+            ("appIdentity", "theme", "i18n", "icons", "seo", "searchConsole", "hostOverrides"),
+        )
+        if site:
+            public_config["site"] = site
+
+    if isinstance(site_config.get("contentHubs"), list):
+        public_hubs = _public_content_hubs(site_config)
         if public_hubs:
             public_config["contentHubs"] = public_hubs
-        else:
-            public_config.pop("contentHubs", None)
     return public_config
 
 
@@ -1587,8 +1951,8 @@ def _fallback_bundle(domain: str, page_id: str, metadata: Dict[str, Any], lifecy
         "pageId": page_id,
         "sourceStage": "fallback",
         "generatedAt": now_iso(),
-        "lifecycle": lifecycle,
-        "siteConfig": site_config,
+        "lifecycle": _public_lifecycle(lifecycle),
+        "siteConfig": _public_site_config(site_config),
         "pageConfig": page_config,
         "components": components,
         "metadata": {
@@ -1618,8 +1982,6 @@ def _published_bundle(
     fallback_from_domain: Optional[str] = None,
     article_bundle: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    if article_bundle is None and not not_found_status:
-        article_bundle = _content_hub_bundle_for_path(payloads["siteConfig"], path, lang, environment)
     variables_payload = _merge_content_hub_variables(
         _merge_variables(domain, page_id, payloads["sharedVariables"], payloads["pageVariables"]),
         payloads["siteConfig"],
@@ -1653,8 +2015,8 @@ def _published_bundle(
         "versionId": version_id,
         "lang": lang,
         "generatedAt": now_iso(),
-        "route": route,
-        "lifecycle": lifecycle,
+        "route": _public_route(route),
+        "lifecycle": _public_lifecycle(lifecycle),
         "siteConfig": _public_site_config(payloads["siteConfig"]),
         "pageConfig": page_config,
         "components": components_payload,
