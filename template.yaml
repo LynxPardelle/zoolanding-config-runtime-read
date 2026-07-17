@@ -99,6 +99,11 @@ Resources:
     Type: AWS::Serverless::Api
     Properties:
       StageName: Prod
+      MethodSettings:
+        - HttpMethod: GET
+          ResourcePath: /~1runtime-bundle
+          ThrottlingRateLimit: 25
+          ThrottlingBurstLimit: 50
       Tags:
         Project: Zoolandingpage
         Component: RuntimeFrontDoor

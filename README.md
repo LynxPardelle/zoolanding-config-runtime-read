@@ -40,9 +40,11 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 
 - DynamoDB table: `zoolanding-config-registry`
 - S3 bucket: `zoolanding-config-payloads`
-- API Gateway: `GET /runtime-bundle`
+- API Gateway: `GET /runtime-bundle`, limited at the stage method to 25 requests/second with a burst of 50
 - CloudWatch Logs
 - Lambda reserved concurrency: `100`
+
+The API Gateway throttle targets only `GET /runtime-bundle`; CORS `OPTIONS` remains available and is not assigned this method setting. API Gateway throttling is best-effort protection against anonymous amplification, not a guaranteed request ceiling or a replacement for a separately approved WAF policy.
 
 ## Environment variables
 
