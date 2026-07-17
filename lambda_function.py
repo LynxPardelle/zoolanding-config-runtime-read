@@ -40,21 +40,63 @@ CONTENT_HUB_QUERY_MAX_PAGES = 2
 CONTENT_HUB_QUERY_MAX_ITEMS = CONTENT_HUB_QUERY_PAGE_SIZE * CONTENT_HUB_QUERY_MAX_PAGES
 CONTENT_HUB_MAX_HUBS_PER_REQUEST = 4
 SAFE_CONTENT_HUB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-CONTENT_HUB_SECRET_KEY_RE = re.compile(
-    r"(?:token|secret|credentials?|password|passphrase|api[_-]?key|private[_-]?(?:key|data)|"
-    r"server[_-]?(?:only|policy)|internal[_-]?policy|authorization|auth[_-]?header|upstream[_-]?headers|"
-    r"table[_-]?name|bucket[_-]?name|lambda[_-]?arn|groups[_-]?to[_-]?roles|signed[_-]?url|"
-    r"tenant[_-]?id|customer[_-]?(?:tax[_-]?id|rfc|curp)|tax[_-]?id|rfc|curp|"
-    r"bank[_-]?(?:account|clabe)|clabe|routing[_-]?number|card[_-]?number|cvv|cvc|"
-    r"aws[_-]?secret|aws[_-]?access|pii)",
-    re.I,
+PUBLIC_SENSITIVE_SAFE_KEY_CONTEXTS = {
+    "mfaSoftwareTokenEnabled": (("runtime_data_source", "mapper", "fields"),),
+    "piiPolicy": (("runtime_content_hub", "analytics_context"),),
+    "csrfCookieName": (("runtime_auth", "session"),),
+    "challengeCsrfCookieName": (("runtime_auth", "session"),),
+    "mfaEnrollCsrfCookieName": (("runtime_auth", "session"),),
+    "csrfHeaderName": (("runtime_auth", "session"),),
+}
+PUBLIC_SENSITIVE_KEY_SEGMENTS = frozenset({
+    "token", "secret", "credential", "credentials", "password", "passphrase",
+    "authorization", "rfc", "curp", "clabe", "cvv", "cvc", "pii",
+})
+PUBLIC_SENSITIVE_KEY_PHRASES = (
+    "api_key", "private_key", "private_data", "server_only", "server_policy",
+    "internal_policy", "auth_header", "upstream_headers", "table_name", "bucket_name",
+    "lambda_arn", "groups_to_roles", "signed_url", "tenant_id", "customer_tax_id",
+    "customer_rfc", "customer_curp", "tax_id", "bank_account", "bank_clabe",
+    "routing_number", "card_number", "aws_secret", "aws_access", "csrf_cookie_name",
+    "challenge_csrf_cookie_name", "mfa_enroll_csrf_cookie_name", "csrf_header_name",
 )
+PUBLIC_SENSITIVE_COLLAPSED_KEY_FRAGMENTS = frozenset(
+    phrase.replace("_", "")
+    for phrase in PUBLIC_SENSITIVE_KEY_PHRASES
+) | frozenset({
+    "token", "secret", "credential", "credentials", "password", "passphrase",
+    "authorization", "rfc", "curp", "clabe", "cvv", "cvc", "pii",
+})
 CONTENT_HUB_UNSAFE_VALUE_RE = re.compile(
     r"(?:javascript:|data:|X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|"
     r"AWSAccessKeyId=|Signature=|Expires=|ssm:/|secretsmanager:/)",
     re.I,
 )
 _PUBLIC_VALUE_BLOCKED = object()
+
+
+def _normalized_public_key_name(value: Any) -> str:
+    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", str(value or ""))
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()
+
+
+def _is_sensitive_public_key(value: Any, parent_path: tuple[str, ...] = ()) -> bool:
+    raw_key = str(value or "")
+    normalized = _normalized_public_key_name(value)
+    if not normalized:
+        return False
+    safe_contexts = PUBLIC_SENSITIVE_SAFE_KEY_CONTEXTS.get(raw_key, ())
+    if parent_path in safe_contexts:
+        return False
+    segments = frozenset(segment for segment in normalized.split("_") if segment)
+    if segments.intersection(PUBLIC_SENSITIVE_KEY_SEGMENTS):
+        return True
+    padded = f"_{normalized}_"
+    if any(f"_{phrase}_" in padded for phrase in PUBLIC_SENSITIVE_KEY_PHRASES):
+        return True
+    collapsed = normalized.replace("_", "")
+    return any(fragment in collapsed for fragment in PUBLIC_SENSITIVE_COLLAPSED_KEY_FRAGMENTS)
 
 
 def _is_record(value: Any) -> bool:
@@ -304,20 +346,21 @@ def _mojibake_score(text: str) -> int:
     return sum(text.count(marker) for marker in ("Ã", "Â", "â"))
 
 
-def _public_content_hub_payload(value: Any) -> Any:
+def _public_content_hub_payload(value: Any, parent_path: tuple[str, ...] = ()) -> Any:
     if isinstance(value, dict):
         output: Dict[str, Any] = {}
         for key, entry in value.items():
-            if CONTENT_HUB_SECRET_KEY_RE.search(str(key)):
+            normalized_key = _normalized_public_key_name(key)
+            if _is_sensitive_public_key(key, parent_path):
                 continue
-            sanitized = _public_content_hub_payload(entry)
+            sanitized = _public_content_hub_payload(entry, parent_path + (normalized_key,))
             if sanitized is not _PUBLIC_VALUE_BLOCKED:
                 output[key] = sanitized
         return output
     if isinstance(value, list):
         output = []
         for entry in value:
-            sanitized = _public_content_hub_payload(entry)
+            sanitized = _public_content_hub_payload(entry, parent_path)
             if sanitized is not _PUBLIC_VALUE_BLOCKED:
                 output.append(sanitized)
         return output
@@ -326,7 +369,12 @@ def _public_content_hub_payload(value: Any) -> Any:
     return value
 
 
-def _project_public_object(value: Any, allowed_keys: Iterable[str]) -> Dict[str, Any]:
+def _project_public_object(
+    value: Any,
+    allowed_keys: Iterable[str],
+    *,
+    base_path: tuple[str, ...] = (),
+) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     projected = {
@@ -334,7 +382,7 @@ def _project_public_object(value: Any, allowed_keys: Iterable[str]) -> Dict[str,
         for key in allowed_keys
         if key in value
     }
-    sanitized = _public_content_hub_payload(projected)
+    sanitized = _public_content_hub_payload(projected, base_path)
     return sanitized if isinstance(sanitized, dict) else {}
 
 
@@ -741,6 +789,21 @@ def _load_content_hub_slug_pointer(
     return item if isinstance(item, dict) else None
 
 
+def _load_content_hub_article_metadata(
+    *,
+    environment: str,
+    hub_id: str,
+    article_id: str,
+) -> Optional[Dict[str, Any]]:
+    table_name = _content_hub_table_name(environment)
+    safe_hub_id = _safe_content_hub_id(hub_id)
+    safe_article_id = _safe_content_hub_id(article_id)
+    if not table_name or not safe_hub_id or not safe_article_id:
+        return None
+    item = load_item(table_name, f"HUB#{safe_hub_id}", f"ARTICLE#{safe_article_id}")
+    return item if isinstance(item, dict) else None
+
+
 def _load_content_hub_json_bundle(
     key: str,
     environment: str,
@@ -816,20 +879,40 @@ def _content_hub_bundle_for_path(
         if not hub_id:
             continue
         locale = _content_hub_locale(hub, lang)
-        for item in _query_content_hub_metadata(hub_id, "ARTICLE#", environment):
-            article = _content_hub_article_summary(item, hub, locale)
-            if not article or _safe_content_hub_path(article.get("path")) != normalized_path:
+        public_articles = hub.get("publicArticles") if isinstance(hub.get("publicArticles"), list) else []
+        for article in public_articles:
+            if not isinstance(article, dict) or _safe_content_hub_path(article.get("path")) != normalized_path:
                 continue
             article_id = _safe_content_hub_id(article.get("articleId"))
-            slug_pointer = _load_content_hub_slug_pointer(
+            if not article_id:
+                continue
+            item = _load_content_hub_article_metadata(
                 environment=environment,
+                hub_id=hub_id,
+                article_id=article_id,
+            )
+            item_summary = _content_hub_article_summary(item, hub, locale) if isinstance(item, dict) else None
+            if not item_summary or _safe_content_hub_path(item_summary.get("path")) != normalized_path:
+                continue
+            bundle_key = str(item.get("publishedBundleKey") or "")
+            if not _safe_content_hub_bundle_key(
+                bundle_key,
+                environment=environment,
+                hub_id=hub_id,
                 render_domain=render_domain,
                 locale=locale,
-                path=normalized_path,
-            )
-            slug_article_id = _safe_content_hub_id((slug_pointer or {}).get("articleId"))
+                article_id=article_id,
+            ):
+                slug_pointer = _load_content_hub_slug_pointer(
+                    environment=environment,
+                    render_domain=render_domain,
+                    locale=locale,
+                    path=normalized_path,
+                )
+                slug_article_id = _safe_content_hub_id((slug_pointer or {}).get("articleId"))
+                bundle_key = str((slug_pointer or {}).get("publishedBundleKey") or "") if slug_article_id == article_id else ""
             bundle = _load_content_hub_json_bundle(
-                str(item.get("publishedBundleKey") or ((slug_pointer or {}).get("publishedBundleKey") if slug_article_id == article_id else "")),
+                bundle_key,
                 environment,
                 hub_id,
                 render_domain,
@@ -1271,6 +1354,7 @@ def _project_runtime_auth(value: Any) -> Dict[str, Any]:
             "loginPageId", "logoutPageId", "callbackPageId", "accountPageId", "postLoginPath",
             "postLogoutPath", "groupsClaim", "allowedGroups", "session", "admin",
         ),
+        base_path=("runtime_auth",),
     )
     if not isinstance(value, dict):
         return auth
@@ -1283,6 +1367,7 @@ def _project_runtime_auth(value: Any) -> Dict[str, Any]:
                 "mfaDisablePath", "csrfCookieName", "challengeCsrfCookieName",
                 "mfaEnrollCsrfCookieName", "csrfHeaderName", "routeAccessCacheMs",
             ),
+            base_path=("runtime_auth", "session"),
         )
         if session:
             auth["session"] = session
@@ -1295,6 +1380,7 @@ def _project_runtime_auth(value: Any) -> Dict[str, Any]:
                 "usersPath", "approveUserPathTemplate", "groupsPathTemplate",
                 "suspendUserPathTemplate", "reactivateUserPathTemplate", "resetUserMfaPathTemplate",
             ),
+            base_path=("runtime_auth", "admin"),
         )
         if admin:
             auth["admin"] = admin
@@ -1311,6 +1397,7 @@ def _project_runtime_data_source(value: Any) -> Dict[str, Any]:
             "target", "statusTarget", "mergeMode", "clearTargetOnLoad", "enabled", "ssr",
             "pageIds", "requiredInputKeys", "skipWhenQueryParams", "input", "mapper", "refresh",
         ),
+        base_path=("runtime_data_source",),
     )
     if not isinstance(value, dict):
         return projected
@@ -1326,7 +1413,11 @@ def _project_runtime_data_source(value: Any) -> Dict[str, Any]:
     for key, allowed_keys in nested_allowlists.items():
         if key not in value or value.get(key) is None:
             continue
-        nested = _project_public_object(value.get(key), allowed_keys)
+        nested = _project_public_object(
+            value.get(key),
+            allowed_keys,
+            base_path=("runtime_data_source", _normalized_public_key_name(key)),
+        )
         if nested:
             projected[key] = nested
         else:
@@ -1410,6 +1501,7 @@ def _project_public_runtime(runtime: Any) -> Dict[str, Any]:
                 "articlePathPattern", "defaultLocale", "locales", "canonicalMode", "runtimeSourceId",
                 "publicApiBasePath", "analyticsContext", "publicArticles", "publicTaxonomy",
             ),
+            base_path=("runtime_content_hub",),
         )
         for hub in runtime.get("contentHubs", [])[:CONTENT_HUB_MAX_HUBS_PER_REQUEST]
         if isinstance(hub, dict)
@@ -1450,7 +1542,7 @@ def _public_site_config(site_config: Dict[str, Any]) -> Dict[str, Any]:
         environments = {
             name: projected
             for name, value in site_config["environments"].items()
-            if not CONTENT_HUB_SECRET_KEY_RE.search(str(name))
+            if not _is_sensitive_public_key(name)
             for projected in [_project_public_object(value, ("aliases",))]
             if projected
         }

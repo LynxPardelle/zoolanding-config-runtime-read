@@ -119,6 +119,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.loaded_keys = []
         self.content_hub_items = []
         self.content_hub_queries = []
+        self.content_hub_item_reads = []
 
         for prefix in ("prod-prefix", "test-prefix", "dev-prefix"):
             self.put_site(prefix, "pamelabetancourt.com", include_not_found=True)
@@ -131,6 +132,16 @@ class RuntimeHandlerTest(unittest.TestCase):
             self.put_page(prefix, "zoolandingpage.com.mx", "not-found", "Canonical 404")
 
         def load_item(_table, pk, sk="METADATA"):
+            if _table in {"content-hub-metadata", "content-hub-metadata-dev", "content-hub-metadata-test", "content-hub-metadata-prod"}:
+                self.content_hub_item_reads.append({"tableName": _table, "pk": pk, "sk": sk})
+                content_hub_item = next((
+                    dict(item)
+                    for item in self.content_hub_items
+                    if item.get("pk") == pk
+                    and item.get("sk") == sk
+                    and str(item.get("tableName") or _table) == _table
+                ), None)
+                return content_hub_item if content_hub_item is not None else self.items.get((pk, sk))
             return self.items.get((pk, sk))
 
         def load_json(bucket, key):
@@ -509,6 +520,15 @@ class RuntimeHandlerTest(unittest.TestCase):
             "privateTopLevel": {"credential": "must-not-render"},
             "runtime": {
                 "features": {"debugMode": False},
+                "auth": {
+                    "enabled": True,
+                    "session": {
+                        "csrfCookieName": "zlp_csrf",
+                        "challengeCsrfCookieName": "zlp_challenge_csrf",
+                        "mfaEnrollCsrfCookieName": "zlp_mfa_enroll_csrf",
+                        "csrfHeaderName": "X-ZLP-CSRF",
+                    },
+                },
                 "authRemote": {
                     "enabled": True,
                     "authProfileId": "main",
@@ -521,6 +541,10 @@ class RuntimeHandlerTest(unittest.TestCase):
                     "proxySourceId": "catalog",
                     "target": "remote.catalog",
                     "input": {"query": {"source": "literal", "fallback": None}},
+                    "mapper": {
+                        "itemsPath": "items",
+                        "fields": {"mfaSoftwareTokenEnabled": "mfaSoftwareTokenEnabled"},
+                    },
                     "credentials": {"apiKey": "must-not-render"},
                     "upstreamHeaders": {"Authorization": "must-not-render"},
                     "internalPolicy": {"privateData": "must-not-render"},
@@ -537,6 +561,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                     "routeBasePath": "/blog",
                     "defaultLocale": "es",
                     "locales": ["es"],
+                    "analyticsContext": {"piiPolicy": "aggregate-only"},
                     "serverPolicy": {"credential": "must-not-render"},
                 }],
             },
@@ -544,10 +569,100 @@ class RuntimeHandlerTest(unittest.TestCase):
 
         self.assertEqual(projected["runtime"]["features"], {"debugMode": False})
         self.assertIsNone(projected["runtime"]["dataSources"][0]["input"]["query"]["fallback"])
+        self.assertEqual(projected["runtime"]["auth"]["session"]["csrfCookieName"], "zlp_csrf")
+        self.assertEqual(projected["runtime"]["auth"]["session"]["challengeCsrfCookieName"], "zlp_challenge_csrf")
+        self.assertEqual(projected["runtime"]["auth"]["session"]["mfaEnrollCsrfCookieName"], "zlp_mfa_enroll_csrf")
+        self.assertEqual(projected["runtime"]["auth"]["session"]["csrfHeaderName"], "X-ZLP-CSRF")
+        self.assertEqual(
+            projected["runtime"]["dataSources"][0]["mapper"]["fields"]["mfaSoftwareTokenEnabled"],
+            "mfaSoftwareTokenEnabled",
+        )
+        self.assertEqual(projected["runtime"]["contentHubs"][0]["analyticsContext"]["piiPolicy"], "aggregate-only")
         self.assertNotIn("privateTopLevel", projected)
         self.assertNotIn("integrations", projected["runtime"])
         self.assertNotIn("serverPolicy", projected["runtime"]["contentHubs"][0])
         self.assertNotIn("must-not-render", json.dumps(projected))
+
+    def test_sensitive_public_key_exceptions_are_limited_to_contract_contexts(self):
+        sanitized = self.handler._public_content_hub_payload({
+            "mfaSoftwareTokenEnabled": "must-not-render",
+            "piiPolicy": "must-not-render",
+            "csrfCookieName": "must-not-render",
+            "challengeCsrfCookieName": "must-not-render",
+            "mfaEnrollCsrfCookieName": "must-not-render",
+            "csrfHeaderName": "must-not-render",
+            "form": {
+                "fields": {
+                    "mfaSoftwareTokenEnabled": "must-not-render",
+                },
+            },
+            "variables": {
+                "analyticsContext": {"piiPolicy": "must-not-render"},
+            },
+            "mapper": {
+                "fields": {
+                    "MFA-software-token-enabled": "must-not-render",
+                },
+            },
+            "analyticsContext": {"PII-POLICY": "must-not-render"},
+        })
+        projected = self.handler._project_public_runtime({
+            "dataSources": [{
+                "id": "account",
+                "mapper": {
+                    "fields": {
+                        "mfaSoftwareTokenEnabled": {"path": "mfa.softwareTokenEnabled"},
+                    },
+                },
+            }],
+            "contentHubs": [{
+                "hubId": "main",
+                "analyticsContext": {"piiPolicy": "no-pii"},
+            }],
+        })
+
+        self.assertNotIn("must-not-render", json.dumps(sanitized))
+        self.assertEqual(
+            projected["dataSources"][0]["mapper"]["fields"]["mfaSoftwareTokenEnabled"],
+            {"path": "mfa.softwareTokenEnabled"},
+        )
+        self.assertEqual(projected["contentHubs"][0]["analyticsContext"]["piiPolicy"], "no-pii")
+
+    def test_sensitive_public_keys_block_legacy_concatenated_spellings(self):
+        sensitive_keys = (
+            "apikey",
+            "privatekey",
+            "privatedata",
+            "serveronly",
+            "serverpolicy",
+            "internalpolicy",
+            "authheader",
+            "upstreamheaders",
+            "tablename",
+            "bucketname",
+            "lambdaarn",
+            "groupstoroles",
+            "signedurl",
+            "tenantid",
+            "customertaxid",
+            "customerrfc",
+            "clientrfc",
+            "taxpayerrfc",
+            "rfccustomer",
+            "customercurp",
+            "taxid",
+            "bankaccount",
+            "bankclabe",
+            "routingnumber",
+            "cardnumber",
+            "awsaccess",
+        )
+        sanitized = self.handler._public_content_hub_payload({
+            key: "must-not-render"
+            for key in sensitive_keys
+        })
+
+        self.assertEqual(sanitized, {})
 
     def test_published_bundle_sanitizes_top_level_route_and_lifecycle(self):
         self.metadata["routes"][0]["serverOnly"] = {"credentialRef": "must-not-render"}
@@ -1218,6 +1333,49 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["variables"]["variables"]["legacyArticleBody"]["html"], "<p>Legacy bundle body</p>")
         self.assertNotIn("publishedBundleKey", serialized)
 
+    def test_runtime_bundle_requires_current_public_metadata_before_using_slug_pointer(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
+        article_path = "/blog/web/qa-e2e"
+        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json"
+        site_config = {
+            "domain": "pamelabetancourt.com",
+            "runtime": {
+                "contentHubs": [{
+                    "hubId": "main",
+                    "defaultLocale": "es",
+                    "locales": ["es"],
+                    "publicArticles": [{"articleId": "art_public", "path": article_path}],
+                }],
+            },
+        }
+        self.content_hub_items = [{
+            "tableName": "content-hub-metadata-test",
+            "pk": "HUB#main",
+            "sk": "ARTICLE#art_public",
+            "articleId": "art_public",
+            "status": "draft",
+            "visibility": "private",
+            "primaryLocale": "es",
+            "path": article_path,
+        }]
+        self.items[("SLUG#test#pamelabetancourt.com#es", f"PATH#{article_path}")] = {
+            "articleId": "art_public",
+            "path": article_path,
+            "publishedBundleKey": bundle_key,
+        }
+        self.package_payloads[bundle_key] = {
+            "articleId": "art_public",
+            "path": article_path,
+            "status": "published",
+            "components": [{"id": "stalePrivateBody", "type": "text"}],
+        }
+
+        bundle = self.handler._content_hub_bundle_for_path(site_config, article_path, "es", "test")
+
+        self.assertIsNone(bundle)
+        self.assertNotIn(bundle_key, self.loaded_keys)
+
     def test_runtime_bundle_ignores_slug_pointer_for_different_article(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
@@ -1408,7 +1566,15 @@ class RuntimeHandlerTest(unittest.TestCase):
             query for query in self.content_hub_queries
             if query["pk"] == "HUB#main" and query["skPrefix"] == "ARTICLE#"
         ]
-        self.assertEqual(len(article_queries), 2)
+        self.assertEqual(len(article_queries), 1)
+        self.assertEqual(
+            [read for read in self.content_hub_item_reads if read["pk"] == "HUB#main"],
+            [{
+                "tableName": "content-hub-metadata-test",
+                "pk": "HUB#main",
+                "sk": "ARTICLE#art_public",
+            }],
+        )
 
     def test_content_hub_bundle_key_must_match_article_context_before_merging(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
