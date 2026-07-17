@@ -3,6 +3,7 @@ import io
 import json
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 from urllib.parse import unquote
 
 
@@ -117,6 +118,8 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.package_payloads = {}
         self.loaded_keys = []
         self.content_hub_items = []
+        self.content_hub_queries = []
+        self.content_hub_item_reads = []
 
         for prefix in ("prod-prefix", "test-prefix", "dev-prefix"):
             self.put_site(prefix, "pamelabetancourt.com", include_not_found=True)
@@ -129,6 +132,16 @@ class RuntimeHandlerTest(unittest.TestCase):
             self.put_page(prefix, "zoolandingpage.com.mx", "not-found", "Canonical 404")
 
         def load_item(_table, pk, sk="METADATA"):
+            if _table in {"content-hub-metadata", "content-hub-metadata-dev", "content-hub-metadata-test", "content-hub-metadata-prod"}:
+                self.content_hub_item_reads.append({"tableName": _table, "pk": pk, "sk": sk})
+                content_hub_item = next((
+                    dict(item)
+                    for item in self.content_hub_items
+                    if item.get("pk") == pk
+                    and item.get("sk") == sk
+                    and str(item.get("tableName") or _table) == _table
+                ), None)
+                return content_hub_item if content_hub_item is not None else self.items.get((pk, sk))
             return self.items.get((pk, sk))
 
         def load_json(bucket, key):
@@ -147,6 +160,13 @@ class RuntimeHandlerTest(unittest.TestCase):
                 expression_values = ExpressionAttributeValues or {}
                 pk = expression_values.get(":pk")
                 sk_prefix = expression_values.get(":sk")
+                self.owner.content_hub_queries.append({
+                    "tableName": self.table_name,
+                    "pk": pk,
+                    "skPrefix": sk_prefix,
+                    "limit": Limit,
+                    "exclusiveStartKey": ExclusiveStartKey,
+                })
                 matches = [
                     dict(item)
                     for item in self.owner.content_hub_items
@@ -481,6 +501,212 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertNotIn("articleIds", body["metadata"]["contentHubs"][0])
         self.assertNotIn("allowedDraftDomains", body["metadata"]["contentHubs"][0])
         self.assertNotIn("serverOnly", body["metadata"]["contentHubs"][0])
+
+    def test_public_site_config_is_deny_by_default_for_runtime_branches(self):
+        projected = self.handler._public_site_config({
+            "version": 1,
+            "domain": "example.com",
+            "routes": [{"path": "/", "pageId": "default"}],
+            "site": {
+                "appIdentity": {"name": "Example"},
+                "privateData": {"customerTaxId": "must-not-render"},
+            },
+            "defaults": {
+                "brand": {"displayName": "Example"},
+                "password": "must-not-render",
+                "apiKey": "must-not-render",
+                "customerTaxId": "must-not-render",
+            },
+            "privateTopLevel": {"credential": "must-not-render"},
+            "runtime": {
+                "features": {"debugMode": False},
+                "auth": {
+                    "enabled": True,
+                    "session": {
+                        "csrfCookieName": "zlp_csrf",
+                        "challengeCsrfCookieName": "zlp_challenge_csrf",
+                        "mfaEnrollCsrfCookieName": "zlp_mfa_enroll_csrf",
+                        "csrfHeaderName": "X-ZLP-CSRF",
+                    },
+                },
+                "authRemote": {
+                    "enabled": True,
+                    "authProfileId": "main",
+                    "endpoint": "/auth",
+                    "credentials": {"apiKey": "must-not-render"},
+                },
+                "dataSources": [{
+                    "id": "catalog",
+                    "kind": "api-proxy",
+                    "proxySourceId": "catalog",
+                    "target": "remote.catalog",
+                    "input": {"query": {"source": "literal", "fallback": None}},
+                    "mapper": {
+                        "itemsPath": "items",
+                        "fields": {"mfaSoftwareTokenEnabled": "mfaSoftwareTokenEnabled"},
+                    },
+                    "credentials": {"apiKey": "must-not-render"},
+                    "upstreamHeaders": {"Authorization": "must-not-render"},
+                    "internalPolicy": {"privateData": "must-not-render"},
+                }],
+                "apiActions": [{
+                    "id": "save",
+                    "kind": "api-proxy",
+                    "proxyActionId": "save",
+                    "internalPolicy": {"password": "must-not-render"},
+                }],
+                "integrations": [{"serverOnly": {"token": "must-not-render"}}],
+                "contentHubs": [{
+                    "hubId": "main",
+                    "routeBasePath": "/blog",
+                    "defaultLocale": "es",
+                    "locales": ["es"],
+                    "analyticsContext": {"piiPolicy": "aggregate-only"},
+                    "serverPolicy": {"credential": "must-not-render"},
+                }],
+            },
+        })
+
+        self.assertEqual(projected["runtime"]["features"], {"debugMode": False})
+        self.assertIsNone(projected["runtime"]["dataSources"][0]["input"]["query"]["fallback"])
+        self.assertEqual(projected["runtime"]["auth"]["session"]["csrfCookieName"], "zlp_csrf")
+        self.assertEqual(projected["runtime"]["auth"]["session"]["challengeCsrfCookieName"], "zlp_challenge_csrf")
+        self.assertEqual(projected["runtime"]["auth"]["session"]["mfaEnrollCsrfCookieName"], "zlp_mfa_enroll_csrf")
+        self.assertEqual(projected["runtime"]["auth"]["session"]["csrfHeaderName"], "X-ZLP-CSRF")
+        self.assertEqual(
+            projected["runtime"]["dataSources"][0]["mapper"]["fields"]["mfaSoftwareTokenEnabled"],
+            "mfaSoftwareTokenEnabled",
+        )
+        self.assertEqual(projected["runtime"]["contentHubs"][0]["analyticsContext"]["piiPolicy"], "aggregate-only")
+        self.assertNotIn("privateTopLevel", projected)
+        self.assertNotIn("integrations", projected["runtime"])
+        self.assertNotIn("serverPolicy", projected["runtime"]["contentHubs"][0])
+        self.assertNotIn("must-not-render", json.dumps(projected))
+
+    def test_sensitive_public_key_exceptions_are_limited_to_contract_contexts(self):
+        sanitized = self.handler._public_content_hub_payload({
+            "mfaSoftwareTokenEnabled": "must-not-render",
+            "piiPolicy": "must-not-render",
+            "csrfCookieName": "must-not-render",
+            "challengeCsrfCookieName": "must-not-render",
+            "mfaEnrollCsrfCookieName": "must-not-render",
+            "csrfHeaderName": "must-not-render",
+            "form": {
+                "fields": {
+                    "mfaSoftwareTokenEnabled": "must-not-render",
+                },
+            },
+            "variables": {
+                "analyticsContext": {"piiPolicy": "must-not-render"},
+            },
+            "mapper": {
+                "fields": {
+                    "MFA-software-token-enabled": "must-not-render",
+                },
+            },
+            "analyticsContext": {"PII-POLICY": "must-not-render"},
+        })
+        projected = self.handler._project_public_runtime({
+            "dataSources": [{
+                "id": "account",
+                "mapper": {
+                    "fields": {
+                        "mfaSoftwareTokenEnabled": {"path": "mfa.softwareTokenEnabled"},
+                    },
+                },
+            }],
+            "contentHubs": [{
+                "hubId": "main",
+                "analyticsContext": {"piiPolicy": "no-pii"},
+            }],
+        })
+
+        self.assertNotIn("must-not-render", json.dumps(sanitized))
+        self.assertEqual(
+            projected["dataSources"][0]["mapper"]["fields"]["mfaSoftwareTokenEnabled"],
+            {"path": "mfa.softwareTokenEnabled"},
+        )
+        self.assertEqual(projected["contentHubs"][0]["analyticsContext"]["piiPolicy"], "no-pii")
+
+    def test_sensitive_public_keys_block_legacy_concatenated_spellings(self):
+        sensitive_keys = (
+            "apikey",
+            "privatekey",
+            "privatedata",
+            "serveronly",
+            "serverpolicy",
+            "internalpolicy",
+            "authheader",
+            "upstreamheaders",
+            "tablename",
+            "bucketname",
+            "lambdaarn",
+            "groupstoroles",
+            "signedurl",
+            "tenantid",
+            "customertaxid",
+            "customerrfc",
+            "clientrfc",
+            "taxpayerrfc",
+            "rfccustomer",
+            "customercurp",
+            "taxid",
+            "bankaccount",
+            "bankclabe",
+            "routingnumber",
+            "cardnumber",
+            "awsaccess",
+        )
+        sanitized = self.handler._public_content_hub_payload({
+            key: "must-not-render"
+            for key in sensitive_keys
+        })
+
+        self.assertEqual(sanitized, {})
+
+    def test_published_bundle_sanitizes_top_level_route_and_lifecycle(self):
+        self.metadata["routes"][0]["serverOnly"] = {"credentialRef": "must-not-render"}
+        self.metadata["lifecycle"]["serverPolicy"] = {"token": "must-not-render"}
+
+        response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+        body = parse(response)
+        serialized = json.dumps(body)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertNotIn("serverOnly", serialized)
+        self.assertNotIn("serverPolicy", serialized)
+        self.assertNotIn("must-not-render", serialized)
+
+    def test_ordinary_route_does_not_attempt_content_hub_article_bundle_lookup(self):
+        with patch.object(self.handler, "_content_hub_bundle_for_path", return_value=None) as lookup:
+            response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+
+        self.assertEqual(response["statusCode"], 200)
+        lookup.assert_not_called()
+
+    def test_lifecycle_fallback_sanitizes_site_config_before_returning_it(self):
+        bundle = self.handler._fallback_bundle(
+            "example.com",
+            "maintenance",
+            {
+                "aliases": ["example.com"],
+                "routes": [{
+                    "path": "/",
+                    "pageId": "maintenance",
+                    "serverOnly": {"credentialRef": "must-not-render"},
+                }],
+            },
+            {
+                "status": "maintenance",
+                "message": "Scheduled maintenance",
+                "serverPolicy": {"token": "must-not-render"},
+            },
+        )
+
+        serialized = json.dumps(bundle["siteConfig"])
+        self.assertNotIn("serverOnly", serialized)
+        self.assertNotIn("serverPolicy", serialized)
+        self.assertNotIn("must-not-render", serialized)
 
     def test_runtime_bundle_hydrates_public_content_hub_indexes_from_metadata_table(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
@@ -1107,6 +1333,49 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["variables"]["variables"]["legacyArticleBody"]["html"], "<p>Legacy bundle body</p>")
         self.assertNotIn("publishedBundleKey", serialized)
 
+    def test_runtime_bundle_requires_current_public_metadata_before_using_slug_pointer(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
+        article_path = "/blog/web/qa-e2e"
+        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json"
+        site_config = {
+            "domain": "pamelabetancourt.com",
+            "runtime": {
+                "contentHubs": [{
+                    "hubId": "main",
+                    "defaultLocale": "es",
+                    "locales": ["es"],
+                    "publicArticles": [{"articleId": "art_public", "path": article_path}],
+                }],
+            },
+        }
+        self.content_hub_items = [{
+            "tableName": "content-hub-metadata-test",
+            "pk": "HUB#main",
+            "sk": "ARTICLE#art_public",
+            "articleId": "art_public",
+            "status": "draft",
+            "visibility": "private",
+            "primaryLocale": "es",
+            "path": article_path,
+        }]
+        self.items[("SLUG#test#pamelabetancourt.com#es", f"PATH#{article_path}")] = {
+            "articleId": "art_public",
+            "path": article_path,
+            "publishedBundleKey": bundle_key,
+        }
+        self.package_payloads[bundle_key] = {
+            "articleId": "art_public",
+            "path": article_path,
+            "status": "published",
+            "components": [{"id": "stalePrivateBody", "type": "text"}],
+        }
+
+        bundle = self.handler._content_hub_bundle_for_path(site_config, article_path, "es", "test")
+
+        self.assertIsNone(bundle)
+        self.assertNotIn(bundle_key, self.loaded_keys)
+
     def test_runtime_bundle_ignores_slug_pointer_for_different_article(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
@@ -1293,6 +1562,19 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertFalse(body["metadata"]["notFound"])
         self.assertIn("Article shell", response["body"])
         self.assertEqual(body["variables"]["variables"]["contentHub"]["currentArticle"]["articleId"], "art_public")
+        article_queries = [
+            query for query in self.content_hub_queries
+            if query["pk"] == "HUB#main" and query["skPrefix"] == "ARTICLE#"
+        ]
+        self.assertEqual(len(article_queries), 1)
+        self.assertEqual(
+            [read for read in self.content_hub_item_reads if read["pk"] == "HUB#main"],
+            [{
+                "tableName": "content-hub-metadata-test",
+                "pk": "HUB#main",
+                "sk": "ARTICLE#art_public",
+            }],
+        )
 
     def test_content_hub_bundle_key_must_match_article_context_before_merging(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
@@ -1448,6 +1730,49 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["pageId"], "blog-article")
         self.assertEqual(body["variables"]["variables"]["contentHub"]["currentArticle"]["articleId"], "art_200")
         self.assertEqual(len(articles), 201)
+
+    def test_content_hub_metadata_query_caps_total_items_and_final_page_size(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        self.content_hub_items = [
+            {
+                "tableName": "content-hub-metadata-test",
+                "pk": "HUB#main",
+                "sk": f"ARTICLE#art_{index:03d}",
+                "articleId": f"art_{index:03d}",
+            }
+            for index in range(401)
+        ]
+
+        items = self.handler._query_content_hub_metadata("main", "ARTICLE#", "test")
+
+        self.assertEqual(len(items), 400)
+        self.assertEqual([query["limit"] for query in self.content_hub_queries], [200, 200])
+
+    def test_content_hub_runtime_indexes_cap_hubs_per_request(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        site_config = {
+            "runtime": {
+                "contentHubs": [
+                    {
+                        "hubId": f"hub-{index}",
+                        "routeBasePath": f"/blog-{index}",
+                        "defaultLocale": "es",
+                        "locales": ["es"],
+                    }
+                    for index in range(5)
+                ]
+            }
+        }
+
+        enriched = self.handler._merge_content_hub_runtime_indexes(site_config, "es", "test")
+        projected = self.handler._public_site_config(enriched)
+
+        self.assertEqual(len(projected["runtime"]["contentHubs"]), 4)
+        self.assertEqual(len(self.content_hub_queries), 8)
+        self.assertEqual(
+            {query["pk"] for query in self.content_hub_queries},
+            {f"HUB#hub-{index}" for index in range(4)},
+        )
 
     def test_unknown_route_uses_configured_not_found_page_id(self):
         response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())

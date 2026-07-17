@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover - local fallback when boto3 is unavailable
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in {"1", "true", "yes", "on"}
+MAX_S3_JSON_BYTES = 1024 * 1024
 _S3_CLIENT = None
 _DYNAMODB_RESOURCE = None
 
@@ -183,7 +184,14 @@ def load_json_from_s3(bucket: str, key: str) -> Optional[Dict[str, Any]]:
             return None
         raise
 
-    raw = response["Body"].read().decode("utf-8")
+    declared_size = response.get("ContentLength")
+    if isinstance(declared_size, int) and declared_size > MAX_S3_JSON_BYTES:
+        raise ValueError("s3_json_too_large")
+
+    raw_bytes = response["Body"].read(MAX_S3_JSON_BYTES + 1)
+    if len(raw_bytes) > MAX_S3_JSON_BYTES:
+        raise ValueError("s3_json_too_large")
+    raw = raw_bytes.decode("utf-8")
     return json.loads(raw) if raw.strip() else {}
 
 

@@ -215,6 +215,22 @@ class SamPackagingTests(unittest.TestCase):
                 self.assertLess(build, sam_build)
                 self.assertLess(sam_build, verify)
 
+    def test_workflows_restore_exact_revision_after_tests_before_build(self):
+        checkout = "uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd"
+        for workflow_name in ("ci.yml", "deploy-test.yml", "deploy-production.yml"):
+            with self.subTest(workflow=workflow_name):
+                workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+                tests = workflow.index('python -m unittest discover -s tests -p "test_*.py"')
+                build = workflow.index("python tools/build_lambda_artifact.py", tests)
+                restored = workflow.rfind(checkout, tests, build)
+
+                self.assertGreater(restored, tests)
+                restore_step = workflow[restored:build]
+                self.assertIn("ref: ${{ github.sha }}", restore_step)
+                self.assertIn("clean: true", restore_step)
+                self.assertIn("fetch-depth: 0", restore_step)
+                self.assertIn("persist-credentials: false", restore_step)
+
     def test_build_directory_and_public_artifact_contract_are_documented(self):
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
