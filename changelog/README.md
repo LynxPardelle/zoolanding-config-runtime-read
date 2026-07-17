@@ -6,6 +6,7 @@ Use [../README.md](../README.md), code, tests, SAM configuration, and workflows 
 
 ## Migrated History
 
+- [Runtime Read bounded public projection and reads, 2026-07-16 CT](2026-07-16-runtime-read-bounded-public-projection.md)
 - [Runtime Read optional payload 403 fix, 2026-07-15 CT](2026-07-15-runtime-read-optional-payload-403-fix.md)
 - [Runtime Read server-only package boundary, 2026-07-14 CT](2026-07-14-runtime-read-server-only-boundary.md)
 - [Codex history migration, 2026-06-28 through 2026-07-04 CT](2026-06-28-to-2026-07-04-codex-history-migration.md)

@@ -71,6 +71,13 @@ jobs:
           else
             echo "No requirements.txt found; skipping dependency audit."
           fi
+      - name: Restore exact revision for packaging
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          clean: true
+          fetch-depth: 0
+          persist-credentials: false
       - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
         with:
           version: 1.163.0
