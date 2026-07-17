@@ -1,7 +1,7 @@
 import copy
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 from urllib.parse import unquote, urlparse
 
 from zoolanding_lambda_common import (
@@ -35,12 +35,18 @@ CONTENT_HUB_METADATA_TABLE_NAME_PROD = os.getenv("CONTENT_HUB_METADATA_TABLE_NAM
 CONTENT_HUB_PACKAGES_BUCKET_NAME = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME", "").strip()
 CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST", "").strip()
 CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD = os.getenv("CONTENT_HUB_PACKAGES_BUCKET_NAME_PROD", "").strip()
+CONTENT_HUB_QUERY_PAGE_SIZE = 200
+CONTENT_HUB_QUERY_MAX_PAGES = 2
+CONTENT_HUB_QUERY_MAX_ITEMS = CONTENT_HUB_QUERY_PAGE_SIZE * CONTENT_HUB_QUERY_MAX_PAGES
+CONTENT_HUB_MAX_HUBS_PER_REQUEST = 4
 SAFE_CONTENT_HUB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 CONTENT_HUB_SECRET_KEY_RE = re.compile(
-    r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|credential[_-]?ref|"
-    r"secret[_-]?ref|private[_-]?key|server[_-]?policy|table[_-]?name|bucket[_-]?name|"
-    r"lambda[_-]?arn|groups[_-]?to[_-]?roles|authorization[_-]?decision|signed[_-]?url|"
-    r"tenant[_-]?id|aws[_-]?secret|aws[_-]?access)",
+    r"(?:token|secret|credentials?|password|passphrase|api[_-]?key|private[_-]?(?:key|data)|"
+    r"server[_-]?(?:only|policy)|internal[_-]?policy|authorization|auth[_-]?header|upstream[_-]?headers|"
+    r"table[_-]?name|bucket[_-]?name|lambda[_-]?arn|groups[_-]?to[_-]?roles|signed[_-]?url|"
+    r"tenant[_-]?id|customer[_-]?(?:tax[_-]?id|rfc|curp)|tax[_-]?id|rfc|curp|"
+    r"bank[_-]?(?:account|clabe)|clabe|routing[_-]?number|card[_-]?number|cvv|cvc|"
+    r"aws[_-]?secret|aws[_-]?access|pii)",
     re.I,
 )
 CONTENT_HUB_UNSAFE_VALUE_RE = re.compile(
@@ -48,6 +54,7 @@ CONTENT_HUB_UNSAFE_VALUE_RE = re.compile(
     r"AWSAccessKeyId=|Signature=|Expires=|ssm:/|secretsmanager:/)",
     re.I,
 )
+_PUBLIC_VALUE_BLOCKED = object()
 
 
 def _is_record(value: Any) -> bool:
@@ -191,7 +198,7 @@ def _public_content_hubs(metadata: Dict[str, Any]) -> list[Dict[str, Any]]:
         return []
 
     public_hubs: list[Dict[str, Any]] = []
-    for raw_hub in raw_hubs:
+    for raw_hub in raw_hubs[:CONTENT_HUB_MAX_HUBS_PER_REQUEST]:
         if not isinstance(raw_hub, dict):
             continue
         hub_id = str(raw_hub.get("hubId") or "").strip()
@@ -304,19 +311,43 @@ def _public_content_hub_payload(value: Any) -> Any:
             if CONTENT_HUB_SECRET_KEY_RE.search(str(key)):
                 continue
             sanitized = _public_content_hub_payload(entry)
-            if sanitized is not None:
+            if sanitized is not _PUBLIC_VALUE_BLOCKED:
                 output[key] = sanitized
         return output
     if isinstance(value, list):
         output = []
         for entry in value:
             sanitized = _public_content_hub_payload(entry)
-            if sanitized is not None:
+            if sanitized is not _PUBLIC_VALUE_BLOCKED:
                 output.append(sanitized)
         return output
     if isinstance(value, str) and CONTENT_HUB_UNSAFE_VALUE_RE.search(value):
-        return None
+        return _PUBLIC_VALUE_BLOCKED
     return value
+
+
+def _project_public_object(value: Any, allowed_keys: Iterable[str]) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    projected = {
+        key: value[key]
+        for key in allowed_keys
+        if key in value
+    }
+    sanitized = _public_content_hub_payload(projected)
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _runtime_content_hubs(site_config: Optional[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
+    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
+    if not isinstance(hubs, list):
+        return []
+    return [
+        hub
+        for hub in hubs[:CONTENT_HUB_MAX_HUBS_PER_REQUEST]
+        if isinstance(hub, dict)
+    ]
 
 
 def _safe_content_hub_timestamp(value: Any) -> str:
@@ -663,22 +694,29 @@ def _query_content_hub_metadata(hub_id: str, sk_prefix: str, environment: str) -
         return []
     items: list[Dict[str, Any]] = []
     exclusive_start_key: Optional[Dict[str, Any]] = None
+    pages = 0
     try:
-        while True:
+        while pages < CONTENT_HUB_QUERY_MAX_PAGES and len(items) < CONTENT_HUB_QUERY_MAX_ITEMS:
+            remaining = CONTENT_HUB_QUERY_MAX_ITEMS - len(items)
             request: Dict[str, Any] = {
                 "KeyConditionExpression": "pk = :pk AND begins_with(sk, :sk)",
                 "ExpressionAttributeValues": {":pk": f"HUB#{hub_id}", ":sk": sk_prefix},
-                "Limit": 200,
+                "Limit": min(CONTENT_HUB_QUERY_PAGE_SIZE, remaining),
             }
             if exclusive_start_key:
                 request["ExclusiveStartKey"] = exclusive_start_key
             response = get_table(table_name).query(**request)
+            pages += 1
             page_items = response.get("Items")
             if isinstance(page_items, list):
-                items.extend(page_items)
+                items.extend(page_items[:remaining])
+            if len(items) >= CONTENT_HUB_QUERY_MAX_ITEMS:
+                return items
             exclusive_start_key = response.get("LastEvaluatedKey")
             if not isinstance(exclusive_start_key, dict) or not exclusive_start_key:
                 return items
+        # ponytail: replace this bounded index with a precomputed paginated index only when a hub needs more than 400 items.
+        return items
     except Exception as exc:
         log("WARNING", "Content hub public index query failed", hubId=hub_id, skPrefix=sk_prefix, errorType=type(exc).__name__)
         return []
@@ -763,9 +801,8 @@ def _content_hub_bundle_for_path(
 ) -> Optional[Dict[str, Any]]:
     if not isinstance(site_config, dict) or not _content_hub_table_name(environment) or not _content_hub_packages_bucket_name(environment):
         return None
-    runtime = site_config.get("runtime")
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list):
+    hubs = _runtime_content_hubs(site_config)
+    if not hubs:
         return None
 
     normalized_path = normalize_route_path(path)
@@ -865,12 +902,12 @@ def _content_hub_taxonomy_from_articles(articles: list[Dict[str, Any]], locale: 
 def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], lang: str, environment: str) -> Optional[Dict[str, Any]]:
     if not isinstance(site_config, dict) or not _content_hub_table_name(environment):
         return site_config
-    runtime = site_config.get("runtime")
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list):
+    hubs = _runtime_content_hubs(site_config)
+    if not hubs:
         return site_config
 
     enriched = copy.deepcopy(site_config)
+    enriched["runtime"]["contentHubs"] = copy.deepcopy(hubs)
     enriched_hubs = enriched["runtime"]["contentHubs"]
     for hub in enriched_hubs:
         if not isinstance(hub, dict):
@@ -924,11 +961,7 @@ def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], la
 
 
 def _content_hub_public_variables(site_config: Optional[Dict[str, Any]], path: str) -> Optional[Dict[str, Any]]:
-    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list) or not hubs:
-        return None
-    valid_hubs = [entry for entry in hubs if isinstance(entry, dict)]
+    valid_hubs = _runtime_content_hubs(site_config)
     if not valid_hubs:
         return None
     articles = [
@@ -998,9 +1031,8 @@ def _content_hub_base_path(hub: Dict[str, Any]) -> str:
 
 
 def _content_hub_taxonomy_route(site_config: Optional[Dict[str, Any]], path: str) -> Optional[Dict[str, Any]]:
-    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list):
+    hubs = _runtime_content_hubs(site_config)
+    if not hubs:
         return None
 
     normalized_path = normalize_route_path(path)
@@ -1063,9 +1095,8 @@ def _route_pattern_matches(pattern: Any, path: str) -> bool:
 
 
 def _is_content_hub_article_path(site_config: Optional[Dict[str, Any]], path: str) -> bool:
-    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
-    hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
-    if not isinstance(hubs, list):
+    hubs = _runtime_content_hubs(site_config)
+    if not hubs:
         return False
     for hub in hubs:
         if not isinstance(hub, dict):
@@ -1208,14 +1239,255 @@ def _merge_content_hub_bundle_page_config_seo(
     return enriched
 
 
+def _public_route(route: Any) -> Optional[Dict[str, Any]]:
+    projected = _project_public_object(route, ("path", "pageId", "label", "labelKey", "auth"))
+    if not projected:
+        return None
+    if isinstance(route, dict) and "auth" in route:
+        auth = _project_public_object(route.get("auth"), ("required", "allowedGroups", "redirectTo"))
+        if auth:
+            projected["auth"] = auth
+        else:
+            projected.pop("auth", None)
+    return projected
+
+
+def _public_lifecycle(lifecycle: Any) -> Dict[str, Any]:
+    return _project_public_object(
+        lifecycle,
+        (
+            "status", "fallbackMode", "fallbackPageId", "fallbackDomain", "fallbackUrl",
+            "message", "reason", "supportEmail", "supportPhone", "updatedAt",
+        ),
+    )
+
+
+def _project_runtime_auth(value: Any) -> Dict[str, Any]:
+    auth = _project_public_object(
+        value,
+        (
+            "enabled", "authProfileId", "provider", "issuer", "userPoolId", "clientId",
+            "hostedUiDomain", "scopes", "redirectPath", "logoutPath", "loginPath",
+            "loginPageId", "logoutPageId", "callbackPageId", "accountPageId", "postLoginPath",
+            "postLogoutPath", "groupsClaim", "allowedGroups", "session", "admin",
+        ),
+    )
+    if not isinstance(value, dict):
+        return auth
+    if "session" in value:
+        session = _project_public_object(
+            value.get("session"),
+            (
+                "mode", "signinPath", "mePath", "logoutPath", "challengeRespondPath",
+                "mfaSetupPath", "mfaVerifyPath", "mfaEnrollStartPath", "mfaEnrollVerifyPath",
+                "mfaDisablePath", "csrfCookieName", "challengeCsrfCookieName",
+                "mfaEnrollCsrfCookieName", "csrfHeaderName", "routeAccessCacheMs",
+            ),
+        )
+        if session:
+            auth["session"] = session
+        else:
+            auth.pop("session", None)
+    if "admin" in value:
+        admin = _project_public_object(
+            value.get("admin"),
+            (
+                "usersPath", "approveUserPathTemplate", "groupsPathTemplate",
+                "suspendUserPathTemplate", "reactivateUserPathTemplate", "resetUserMfaPathTemplate",
+            ),
+        )
+        if admin:
+            auth["admin"] = admin
+        else:
+            auth.pop("admin", None)
+    return auth
+
+
+def _project_runtime_data_source(value: Any) -> Dict[str, Any]:
+    projected = _project_public_object(
+        value,
+        (
+            "id", "kind", "proxySourceId", "authAdminSource", "contentHub", "comboCatalog",
+            "target", "statusTarget", "mergeMode", "clearTargetOnLoad", "enabled", "ssr",
+            "pageIds", "requiredInputKeys", "skipWhenQueryParams", "input", "mapper", "refresh",
+        ),
+    )
+    if not isinstance(value, dict):
+        return projected
+    nested_allowlists = {
+        "contentHub": (
+            "read", "hubId", "articleId", "language", "revisionId", "taxonomyId",
+            "taxonomyKind", "assetId", "commentId", "scheduleId",
+        ),
+        "comboCatalog": ("read",),
+        "mapper": ("itemsPath", "singleItem", "prependItems", "fields", "metaFields"),
+        "refresh": ("mode", "intervalMs"),
+    }
+    for key, allowed_keys in nested_allowlists.items():
+        if key not in value or value.get(key) is None:
+            continue
+        nested = _project_public_object(value.get(key), allowed_keys)
+        if nested:
+            projected[key] = nested
+        else:
+            projected.pop(key, None)
+    return projected
+
+
+def _project_runtime_api_action(value: Any) -> Dict[str, Any]:
+    projected = _project_public_object(
+        value,
+        (
+            "id", "kind", "proxyActionId", "authAdminAction", "contentHub", "comboCatalog",
+            "method", "statusTarget", "enabled", "inputFields", "requiresUserGesture",
+        ),
+    )
+    if not isinstance(value, dict):
+        return projected
+    nested_allowlists = {
+        "contentHub": (
+            "action", "hubId", "articleId", "language", "revisionId", "taxonomyId",
+            "taxonomyKind", "assetId", "commentId", "scheduleId",
+        ),
+        "comboCatalog": ("action",),
+    }
+    for key, allowed_keys in nested_allowlists.items():
+        if key not in value:
+            continue
+        nested = _project_public_object(value.get(key), allowed_keys)
+        if nested:
+            projected[key] = nested
+        else:
+            projected.pop(key, None)
+    return projected
+
+
+def _project_public_runtime(runtime: Any) -> Dict[str, Any]:
+    if not isinstance(runtime, dict):
+        return {}
+    public_runtime: Dict[str, Any] = {}
+    simple_objects = {
+        "localStorage": (
+            "theme", "language", "userPreferences", "id", "sessionId", "allowAnalytics",
+            "analyticsConsentSnooze", "adAttribution", "pageViewCount",
+        ),
+        "features": ("debugMode",),
+        "analytics": (
+            "enabled", "consentUI", "consentSnoozeSeconds", "events", "categories",
+            "quickStats", "googleTag", "track",
+        ),
+        "authRemote": ("enabled", "authProfileId", "endpoint"),
+        "comboCatalog": ("enabled", "endpoint", "authProfileId", "draftDomain"),
+    }
+    for key, allowed_keys in simple_objects.items():
+        if key in runtime:
+            value = _project_public_object(runtime.get(key), allowed_keys)
+            if value:
+                public_runtime[key] = value
+
+    if "navigation" in runtime:
+        navigation = _project_public_object(runtime.get("navigation"), ("scrollRestoration",))
+        raw_scroll = runtime.get("navigation", {}).get("scrollRestoration") if isinstance(runtime.get("navigation"), dict) else None
+        if raw_scroll is not None:
+            scroll = _project_public_object(raw_scroll, ("mode", "top", "left", "behavior"))
+            if scroll:
+                navigation["scrollRestoration"] = scroll
+            else:
+                navigation.pop("scrollRestoration", None)
+        if navigation:
+            public_runtime["navigation"] = navigation
+
+    if "auth" in runtime:
+        auth = _project_runtime_auth(runtime.get("auth"))
+        if auth:
+            public_runtime["auth"] = auth
+
+    hubs = [
+        _project_public_object(
+            hub,
+            (
+                "hubId", "ownerDraftDomain", "source", "routeBasePath", "listPath",
+                "articlePathPattern", "defaultLocale", "locales", "canonicalMode", "runtimeSourceId",
+                "publicApiBasePath", "analyticsContext", "publicArticles", "publicTaxonomy",
+            ),
+        )
+        for hub in runtime.get("contentHubs", [])[:CONTENT_HUB_MAX_HUBS_PER_REQUEST]
+        if isinstance(hub, dict)
+    ] if isinstance(runtime.get("contentHubs"), list) else []
+    if hubs:
+        public_runtime["contentHubs"] = hubs
+
+    data_sources = [
+        projected
+        for item in (runtime.get("dataSources") if isinstance(runtime.get("dataSources"), list) else [])
+        for projected in [_project_runtime_data_source(item)]
+        if projected
+    ]
+    if data_sources:
+        public_runtime["dataSources"] = data_sources
+
+    api_actions = [
+        projected
+        for item in (runtime.get("apiActions") if isinstance(runtime.get("apiActions"), list) else [])
+        for projected in [_project_runtime_api_action(item)]
+        if projected
+    ]
+    if api_actions:
+        public_runtime["apiActions"] = api_actions
+    return public_runtime
+
+
 def _public_site_config(site_config: Dict[str, Any]) -> Dict[str, Any]:
-    public_config = copy.deepcopy(site_config)
-    if isinstance(public_config.get("contentHubs"), list):
-        public_hubs = _public_content_hubs(public_config)
+    public_config: Dict[str, Any] = {}
+    for key in ("version", "domain", "aliases", "defaultPageId", "notFoundPageId", "defaults"):
+        if key not in site_config:
+            continue
+        sanitized = _public_content_hub_payload(site_config[key])
+        if sanitized is not _PUBLIC_VALUE_BLOCKED:
+            public_config[key] = sanitized
+
+    if isinstance(site_config.get("environments"), dict):
+        environments = {
+            name: projected
+            for name, value in site_config["environments"].items()
+            if not CONTENT_HUB_SECRET_KEY_RE.search(str(name))
+            for projected in [_project_public_object(value, ("aliases",))]
+            if projected
+        }
+        if environments:
+            public_config["environments"] = environments
+
+    if isinstance(site_config.get("routes"), list):
+        routes = [projected for route in site_config["routes"] for projected in [_public_route(route)] if projected]
+        public_config["routes"] = routes
+
+    if "sitemap" in site_config:
+        sitemap = _project_public_object(site_config.get("sitemap"), ("urls", "excludePaths"))
+        if sitemap:
+            public_config["sitemap"] = sitemap
+
+    if "lifecycle" in site_config:
+        lifecycle = _public_lifecycle(site_config.get("lifecycle"))
+        if lifecycle:
+            public_config["lifecycle"] = lifecycle
+
+    if "runtime" in site_config:
+        runtime = _project_public_runtime(site_config.get("runtime"))
+        if runtime:
+            public_config["runtime"] = runtime
+
+    if "site" in site_config:
+        site = _project_public_object(
+            site_config.get("site"),
+            ("appIdentity", "theme", "i18n", "icons", "seo", "searchConsole", "hostOverrides"),
+        )
+        if site:
+            public_config["site"] = site
+
+    if isinstance(site_config.get("contentHubs"), list):
+        public_hubs = _public_content_hubs(site_config)
         if public_hubs:
             public_config["contentHubs"] = public_hubs
-        else:
-            public_config.pop("contentHubs", None)
     return public_config
 
 
@@ -1587,8 +1859,8 @@ def _fallback_bundle(domain: str, page_id: str, metadata: Dict[str, Any], lifecy
         "pageId": page_id,
         "sourceStage": "fallback",
         "generatedAt": now_iso(),
-        "lifecycle": lifecycle,
-        "siteConfig": site_config,
+        "lifecycle": _public_lifecycle(lifecycle),
+        "siteConfig": _public_site_config(site_config),
         "pageConfig": page_config,
         "components": components,
         "metadata": {
@@ -1618,8 +1890,6 @@ def _published_bundle(
     fallback_from_domain: Optional[str] = None,
     article_bundle: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    if article_bundle is None and not not_found_status:
-        article_bundle = _content_hub_bundle_for_path(payloads["siteConfig"], path, lang, environment)
     variables_payload = _merge_content_hub_variables(
         _merge_variables(domain, page_id, payloads["sharedVariables"], payloads["pageVariables"]),
         payloads["siteConfig"],
@@ -1653,8 +1923,8 @@ def _published_bundle(
         "versionId": version_id,
         "lang": lang,
         "generatedAt": now_iso(),
-        "route": route,
-        "lifecycle": lifecycle,
+        "route": _public_route(route),
+        "lifecycle": _public_lifecycle(lifecycle),
         "siteConfig": _public_site_config(payloads["siteConfig"]),
         "pageConfig": page_config,
         "components": components_payload,
