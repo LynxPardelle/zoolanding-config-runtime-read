@@ -40,6 +40,10 @@ CONTENT_HUB_QUERY_MAX_PAGES = 2
 CONTENT_HUB_QUERY_MAX_ITEMS = CONTENT_HUB_QUERY_PAGE_SIZE * CONTENT_HUB_QUERY_MAX_PAGES
 CONTENT_HUB_MAX_HUBS_PER_REQUEST = 4
 SAFE_CONTENT_HUB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+LOCALE_CODE_RE = re.compile(
+    r"^[A-Za-z]{2,3}(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|[0-9]{3}))?"
+    r"(?:-(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3}))*$"
+)
 PUBLIC_SENSITIVE_SAFE_KEY_CONTEXTS = {
     "mfaSoftwareTokenEnabled": (("runtime_data_source", "mapper", "fields"),),
     "piiPolicy": (("runtime_content_hub", "analytics_context"),),
@@ -453,12 +457,61 @@ def _content_hub_locale(hub: Dict[str, Any], lang: str) -> str:
     return _safe_content_hub_id(str(hub.get("defaultLocale") or hub.get("defaultLanguage") or "es").lower()) or "es"
 
 
+def _normalize_locale(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    raw = value.strip()
+    if not raw or not LOCALE_CODE_RE.fullmatch(raw):
+        return ""
+
+    parts = raw.split("-")
+    normalized = [parts[0].lower()]
+    for part in parts[1:]:
+        if len(part) == 4 and part.isalpha():
+            normalized.append(part[0].upper() + part[1:].lower())
+        elif len(part) == 2 and part.isalpha():
+            normalized.append(part.upper())
+        else:
+            normalized.append(part.lower())
+    return "-".join(normalized)
+
+
+def _supported_site_languages(site_config: Optional[Dict[str, Any]]) -> set[str]:
+    if not isinstance(site_config, dict):
+        return set()
+    site = site_config.get("site")
+    i18n = site.get("i18n") if isinstance(site, dict) else None
+    entries = i18n.get("supportedLanguages") if isinstance(i18n, dict) else None
+    if not isinstance(entries, list):
+        return set()
+
+    supported: set[str] = set()
+    for entry in entries:
+        raw_code = entry if isinstance(entry, str) else entry.get("code") if isinstance(entry, dict) else None
+        normalized = _normalize_locale(raw_code)
+        if normalized:
+            supported.add(normalized)
+    return supported
+
+
 def _site_default_language(site_config: Optional[Dict[str, Any]]) -> str:
     if not isinstance(site_config, dict):
         return ""
     site = site_config.get("site")
     i18n = site.get("i18n") if isinstance(site, dict) else None
     return _safe_content_hub_id(str((i18n or {}).get("defaultLanguage") or "").lower()) if isinstance(i18n, dict) else ""
+
+
+def _effective_route_language(
+    route: Optional[Dict[str, Any]],
+    requested_language: str,
+    site_config: Optional[Dict[str, Any]],
+) -> str:
+    if isinstance(route, dict) and "language" in route:
+        route_language = _normalize_locale(route.get("language"))
+        if route_language:
+            return route_language
+    return requested_language or _site_default_language(site_config) or "en"
 
 
 def _content_hub_taxonomy_slug(value: Any) -> str:
@@ -982,7 +1035,26 @@ def _content_hub_taxonomy_from_articles(articles: list[Dict[str, Any]], locale: 
     return taxonomy
 
 
-def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], lang: str, environment: str) -> Optional[Dict[str, Any]]:
+def _runtime_content_hub_metadata(
+    hub_id: str,
+    sort_key_prefix: str,
+    environment: str,
+    metadata_cache: Optional[Dict[tuple[str, str, str], list[Dict[str, Any]]]],
+) -> list[Dict[str, Any]]:
+    if metadata_cache is None:
+        return _query_content_hub_metadata(hub_id, sort_key_prefix, environment)
+    cache_key = (environment, hub_id, sort_key_prefix)
+    if cache_key not in metadata_cache:
+        metadata_cache[cache_key] = _query_content_hub_metadata(hub_id, sort_key_prefix, environment)
+    return metadata_cache[cache_key]
+
+
+def _merge_content_hub_runtime_indexes(
+    site_config: Optional[Dict[str, Any]],
+    lang: str,
+    environment: str,
+    metadata_cache: Optional[Dict[tuple[str, str, str], list[Dict[str, Any]]]] = None,
+) -> Optional[Dict[str, Any]]:
     if not isinstance(site_config, dict) or not _content_hub_table_name(environment):
         return site_config
     hubs = _runtime_content_hubs(site_config)
@@ -1013,7 +1085,7 @@ def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], la
         }
         dynamic_articles = [
             _supplement_dynamic_public_article(article, existing_articles_by_id)
-            for item in _query_content_hub_metadata(hub_id, "ARTICLE#", environment)
+            for item in _runtime_content_hub_metadata(hub_id, "ARTICLE#", environment, metadata_cache)
             for article in [_content_hub_article_summary(item, hub, locale)]
             if article
         ]
@@ -1027,7 +1099,7 @@ def _merge_content_hub_runtime_indexes(site_config: Optional[Dict[str, Any]], la
 
         dynamic_taxonomy = [
             taxonomy
-            for item in _query_content_hub_metadata(hub_id, "TAXONOMY#", environment)
+            for item in _runtime_content_hub_metadata(hub_id, "TAXONOMY#", environment, metadata_cache)
             for taxonomy in [_content_hub_taxonomy_summary(item, "", locale)]
             if taxonomy
         ]
@@ -1323,7 +1395,7 @@ def _merge_content_hub_bundle_page_config_seo(
 
 
 def _public_route(route: Any) -> Optional[Dict[str, Any]]:
-    projected = _project_public_object(route, ("path", "pageId", "label", "labelKey", "auth"))
+    projected = _project_public_object(route, ("path", "pageId", "language", "label", "labelKey", "auth"))
     if not projected:
         return None
     if isinstance(route, dict) and "auth" in route:
@@ -1583,18 +1655,96 @@ def _public_site_config(site_config: Dict[str, Any]) -> Dict[str, Any]:
     return public_config
 
 
-def _match_route(metadata: Dict[str, Any], path: str) -> Optional[Dict[str, Any]]:
-    normalized_path = normalize_route_path(path)
-    parameterized_match: Optional[Dict[str, Any]] = None
+def _published_metadata_scope(
+    metadata: Any,
+    site_config: Any,
+    published_pointer: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    scoped = dict(metadata) if isinstance(metadata, dict) else {}
+    # Authoring advances these package-derived registry fields before an
+    # environment's published pointer moves, so a mismatched draft is not truth.
+    draft_pointer = metadata.get("draft") if isinstance(metadata, dict) else None
+    if isinstance(draft_pointer, dict):
+        draft_version = str(draft_pointer.get("versionId") or "").strip()
+        published_version = str((published_pointer or {}).get("versionId") or "").strip()
+        draft_prefix = str(draft_pointer.get("prefix") or "").strip()
+        published_prefix = str((published_pointer or {}).get("prefix") or "").strip()
+        pointers_match = (
+            bool(draft_version)
+            and draft_version == published_version
+            and (
+                not draft_prefix
+                or not published_prefix
+                or draft_prefix == published_prefix
+            )
+        )
+        if not pointers_match:
+            for field in ("defaultPageId", "routes", "contentHubs"):
+                scoped.pop(field, None)
+            return scoped
 
-    for route in metadata.get("routes", []):
+    published_routes = site_config.get("routes") if isinstance(site_config, dict) else None
+    published_paths = {
+        normalize_route_path(route.get("path", "/"))
+        for route in published_routes
+        if isinstance(route, dict)
+    } if isinstance(published_routes, list) else set()
+    metadata_routes = metadata.get("routes") if isinstance(metadata, dict) else None
+    scoped["routes"] = [
+        route
+        for route in metadata_routes
+        if isinstance(route, dict)
+        and normalize_route_path(route.get("path", "/")) in published_paths
+    ] if isinstance(metadata_routes, list) else []
+    return scoped
+
+
+def _validate_route_languages(source: Any, supported_languages: set[str]) -> None:
+    if not isinstance(source, dict) or not isinstance(source.get("routes"), list):
+        return
+
+    seen_page_languages: set[tuple[str, str]] = set()
+    for route in source["routes"]:
+        if not isinstance(route, dict) or "language" not in route:
+            continue
+        raw_language = route.get("language")
+        normalized_language = _normalize_locale(raw_language)
+        if (
+            not isinstance(raw_language, str)
+            or raw_language != normalized_language
+            or normalized_language not in supported_languages
+        ):
+            raise ValueError("invalid_route_language")
+
+        page_id = route.get("pageId")
+        if not isinstance(page_id, str) or not page_id or page_id != page_id.strip():
+            raise ValueError("invalid_route_language")
+        page_language = (page_id, normalized_language)
+        if page_language in seen_page_languages:
+            raise ValueError("duplicate_page_route_language")
+        seen_page_languages.add(page_language)
+
+
+def _exact_route(source: Any, path: str) -> Optional[Dict[str, Any]]:
+    normalized_path = normalize_route_path(path)
+    routes = source.get("routes", []) if isinstance(source, dict) else []
+    for route in routes:
         if not isinstance(route, dict):
             continue
         route_path = normalize_route_path(route.get("path", "/"))
         if route_path == normalized_path:
             return route
+    return None
 
-        if parameterized_match is not None or ":" not in route_path:
+
+def _parameterized_route(source: Any, path: str) -> Optional[Dict[str, Any]]:
+    normalized_path = normalize_route_path(path)
+    routes = source.get("routes", []) if isinstance(source, dict) else []
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        route_path = normalize_route_path(route.get("path", "/"))
+        if ":" not in route_path:
             continue
 
         route_segments = [segment for segment in route_path.split("/") if segment]
@@ -1602,15 +1752,21 @@ def _match_route(metadata: Dict[str, Any], path: str) -> Optional[Dict[str, Any]
         if len(route_segments) != len(path_segments):
             continue
         if all(route_segment.startswith(":") or route_segment == path_segment for route_segment, path_segment in zip(route_segments, path_segments)):
-            parameterized_match = route
-
-    if parameterized_match is not None:
-        return parameterized_match
+            return route
     return None
 
 
+def _match_route(metadata: Dict[str, Any], path: str) -> Optional[Dict[str, Any]]:
+    return _exact_route(metadata, path) or _parameterized_route(metadata, path)
+
+
 def _resolve_route(metadata: Dict[str, Any], site_config: Optional[Dict[str, Any]], path: str) -> Optional[Dict[str, Any]]:
-    return _match_route(metadata, path) or (_match_route(site_config, path) if isinstance(site_config, dict) else None)
+    return (
+        _exact_route(site_config, path)
+        or _exact_route(metadata, path)
+        or _parameterized_route(site_config, path)
+        or _parameterized_route(metadata, path)
+    )
 
 
 def _resolve_default_page_id(metadata: Dict[str, Any], site_config: Optional[Dict[str, Any]]) -> str:
@@ -1828,13 +1984,24 @@ def _merge_content_hub_bundle_i18n(
 def _fallback_bundle(domain: str, page_id: str, metadata: Dict[str, Any], lifecycle: Dict[str, Any]) -> Dict[str, Any]:
     message = str(lifecycle.get("message") or "This site is currently unavailable. Please contact the administrator.")
     status = str(lifecycle.get("status") or "maintenance")
+    metadata_routes = metadata.get("routes")
+    fallback_routes = []
+    if isinstance(metadata_routes, list):
+        for route in metadata_routes:
+            if not isinstance(route, dict):
+                continue
+            fallback_route = dict(route)
+            fallback_route.pop("language", None)
+            fallback_routes.append(fallback_route)
+    if not fallback_routes:
+        fallback_routes = [{"path": "/", "pageId": page_id, "label": "Unavailable"}]
 
     site_config = {
         "version": 1,
         "domain": domain,
         "aliases": metadata.get("aliases", []),
         "defaultPageId": page_id,
-        "routes": metadata.get("routes", [{"path": "/", "pageId": page_id, "label": "Unavailable"}]),
+        "routes": fallback_routes,
         "lifecycle": lifecycle,
         "site": {
             "appIdentity": {
@@ -2066,8 +2233,13 @@ def _canonical_not_found_response(
         return not_found("Canonical 404 published configuration prefix is missing", domain=domain)
 
     site_config = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/site-config.json")
-    page_id = _resolve_not_found_page_id(metadata, site_config) or "not-found"
-    route = _resolve_route(metadata, site_config, "/404")
+    published_metadata = _published_metadata_scope(metadata, site_config, published_pointer)
+    supported_languages = _supported_site_languages(site_config)
+    _validate_route_languages(site_config, supported_languages)
+    _validate_route_languages(published_metadata, supported_languages)
+    page_id = _resolve_not_found_page_id(published_metadata, site_config) or "not-found"
+    route = _resolve_route(published_metadata, site_config, "/404")
+    lang = _effective_route_language(route, lang, site_config)
     payloads = _load_runtime_payloads(domain, prefix, page_id, lang, site_config)
     if not payloads:
         return not_found("Canonical 404 payload set is incomplete", domain=domain, pageId=page_id, versionId=version_id)
@@ -2083,7 +2255,7 @@ def _canonical_not_found_response(
         path=path,
         lang=lang,
         lifecycle=lifecycle,
-        site_metadata=metadata,
+        site_metadata=published_metadata,
         route=route,
         page_id=page_id,
         payloads=payloads,
@@ -2119,15 +2291,32 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             )
 
         lifecycle = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {"status": "active"}
+        published_pointer = _published_pointer(metadata, environment)
+        version_id = str((published_pointer or {}).get("versionId") or "").strip()
+        prefix = str(
+            (published_pointer or {}).get("prefix")
+            or (default_version_prefix(domain, version_id) if published_pointer else "")
+        ).strip()
+        raw_site_config = (
+            _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/site-config.json")
+            if published_pointer and prefix
+            else None
+        )
+        published_metadata = _published_metadata_scope(metadata, raw_site_config, published_pointer)
+        supported_languages = _supported_site_languages(raw_site_config)
+        _validate_route_languages(raw_site_config, supported_languages)
+        _validate_route_languages(published_metadata, supported_languages)
 
         if str(lifecycle.get("status") or "active") != "active":
-            route = _match_route(metadata, path)
-            page_id = str((route or {}).get("pageId") or metadata.get("defaultPageId") or "default").strip() or "default"
-            bundle = _fallback_bundle(domain, page_id, metadata, lifecycle)
+            route = _resolve_route(published_metadata, raw_site_config, path)
+            page_id = str(
+                (route or {}).get("pageId")
+                or _resolve_default_page_id(published_metadata, raw_site_config)
+            ).strip() or "default"
+            bundle = _fallback_bundle(domain, page_id, published_metadata, lifecycle)
             bundle["environment"] = environment
             return ok(bundle)
 
-        published_pointer = _published_pointer(metadata, environment)
         if not published_pointer:
             return _canonical_not_found_response(
                 request_id=request_id,
@@ -2138,14 +2327,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 fallback_from_domain=domain,
             )
 
-        version_id = str(published_pointer.get("versionId") or "").strip()
-        prefix = str(published_pointer.get("prefix") or default_version_prefix(domain, version_id)).strip()
         if not prefix:
             return not_found("Published configuration prefix is missing", domain=domain)
 
-        site_config = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{domain}/site-config.json")
-        lang = requested_lang or _site_default_language(site_config) or "en"
-        site_config = _merge_content_hub_runtime_indexes(site_config, lang, environment)
+        route = _resolve_route(published_metadata, raw_site_config, path)
+        lang = _effective_route_language(route, requested_lang, raw_site_config)
+        content_hub_metadata_cache: Dict[tuple[str, str, str], list[Dict[str, Any]]] = {}
+        site_config = _merge_content_hub_runtime_indexes(
+            raw_site_config,
+            lang,
+            environment,
+            content_hub_metadata_cache,
+        )
         if not site_config:
             return _canonical_not_found_response(
                 request_id=request_id,
@@ -2156,31 +2349,56 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 fallback_from_domain=domain,
             )
 
-        route = _resolve_route(metadata, site_config, path)
+        route = _resolve_route(published_metadata, site_config, path)
         should_render_not_found = False
         article_bundle = None
         if route:
-            page_id = str(route.get("pageId") or _resolve_default_page_id(metadata, site_config)).strip() or "default"
+            page_id = str(
+                route.get("pageId")
+                or _resolve_default_page_id(published_metadata, site_config)
+            ).strip() or "default"
         elif path == "/":
-            page_id = _resolve_default_page_id(metadata, site_config)
+            page_id = _resolve_default_page_id(published_metadata, site_config)
         else:
-            page_id = _resolve_not_found_page_id(metadata, site_config)
+            page_id = _resolve_not_found_page_id(published_metadata, site_config)
             should_render_not_found = True
-            route = _resolve_route(metadata, site_config, "/404")
+            route = _resolve_route(published_metadata, site_config, "/404")
 
         if not should_render_not_found and _is_content_hub_article_path(site_config, path):
             if not _content_hub_public_article_exists(site_config, path):
-                page_id = _resolve_not_found_page_id(metadata, site_config)
+                page_id = _resolve_not_found_page_id(published_metadata, site_config)
                 should_render_not_found = True
-                route = _resolve_route(metadata, site_config, "/404")
+                route = _resolve_route(published_metadata, site_config, "/404")
             else:
                 article_bundle = _content_hub_bundle_for_path(site_config, path, lang, environment)
 
         if not should_render_not_found and _content_hub_taxonomy_route(site_config, path):
             if not _content_hub_public_taxonomy_exists(site_config, path):
-                page_id = _resolve_not_found_page_id(metadata, site_config)
+                page_id = _resolve_not_found_page_id(published_metadata, site_config)
                 should_render_not_found = True
-                route = _resolve_route(metadata, site_config, "/404")
+                route = _resolve_route(published_metadata, site_config, "/404")
+
+        final_lang = _effective_route_language(route, requested_lang, raw_site_config)
+        if final_lang != lang:
+            lang = final_lang
+            site_config = _merge_content_hub_runtime_indexes(
+                raw_site_config,
+                lang,
+                environment,
+                content_hub_metadata_cache,
+            )
+            if not site_config:
+                return _canonical_not_found_response(
+                    request_id=request_id,
+                    requested_domain=requested_domain,
+                    path=path,
+                    lang=lang,
+                    environment=environment,
+                    fallback_from_domain=domain,
+                )
+            if should_render_not_found:
+                page_id = _resolve_not_found_page_id(published_metadata, site_config)
+                route = _resolve_route(published_metadata, site_config, "/404")
 
         if should_render_not_found and not page_id:
             return _canonical_not_found_response(
@@ -2222,7 +2440,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             path=path,
             lang=lang,
             lifecycle=lifecycle,
-            site_metadata=metadata,
+            site_metadata=published_metadata,
             route=route,
             page_id=page_id,
             payloads=payloads,
