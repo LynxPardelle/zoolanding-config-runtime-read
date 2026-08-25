@@ -6,6 +6,7 @@ Use [../README.md](../README.md), code, tests, SAM configuration, and workflows 
 
 ## Migrated History
 
+- [Fixed-language route resolution, 2026-08-24 CT](2026-08-24-fixed-route-language.md)
 - [Runtime Read public method throttle, 2026-07-16 CT](2026-07-16-runtime-read-public-throttle.md)
 - [Runtime Read bounded public projection and reads, 2026-07-16 CT](2026-07-16-runtime-read-bounded-public-projection.md)
 - [Runtime Read optional payload 403 fix, 2026-07-15 CT](2026-07-15-runtime-read-optional-payload-403-fix.md)
