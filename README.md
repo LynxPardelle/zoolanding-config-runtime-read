@@ -30,6 +30,7 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 - Resolve alias domains back to the canonical site and environment when `site-config.json.aliases` or `site-config.json.environments.*.aliases` declares alternate hosts.
 - Resolve the current page by host and route.
 - Resolve exact routes before parameterized route patterns such as `/blog/:categorySlug`.
+- Honor an optional canonical `routes[].language` before request/default language selection, while leaving language-free routes on their legacy precedence.
 - Load the published payload set from S3, rejecting individual JSON objects larger than 1 MiB before parsing.
 - Merge shared and page components.
 - Merge shared and page variables, angora combos, and i18n dictionaries.
@@ -118,11 +119,40 @@ The request also works without the `domain` query string when the API receives a
 
 Runtime requests can use `environment=dev` or `environment=test` on canonical-domain reads when the frontend/API proxy is configured to request non-production bundles.
 
+## Fixed-language routes
+
+A route may opt into one supported language:
+
+```json
+{
+  "routes": [
+    { "path": "/campaign/eng", "pageId": "campaign", "language": "en" },
+    { "path": "/campaign/zh", "pageId": "campaign", "language": "zh" }
+  ],
+  "site": {
+    "i18n": {
+      "defaultLanguage": "es",
+      "supportedLanguages": ["es", "en", "zh"]
+    }
+  }
+}
+```
+
+Runtime Read resolves an exact site-config route before older metadata and before parameterized matches. A route-bound language is authoritative even when the request supplies a conflicting `lang`; the returned top-level `lang`, matched `route.language`, projected `siteConfig.routes`, and loaded i18n path therefore stay aligned. This also applies when an unknown, missing-article, or missing-taxonomy path ultimately selects an exact fixed-language `/404` route. Older metadata that omits `language` remains compatible because the exact published site-config route supplies it.
+
+The active immutable published pointer and its package are the runtime source of truth. Config Authoring updates the registry's package-derived `defaultPageId`, `routes`, and `contentHubs` fields for a newer draft before that draft is published. When the registry draft pointer does not identify the active published version, Runtime Read removes all three fields from its published-metadata view and relies on the immutable published `site-config.json` plus legacy `default` fallback. Draft-ahead defaults, routes, and hubs are therefore not resolved, validated, or projected until publication moves the environment pointer. Metadata without a draft pointer and metadata whose draft pointer matches the published version retain their compatibility behavior; metadata routes remain limited to paths present in the published site config.
+
+Routes without `language` continue using request `lang`, then the site default, then `en`, including the historical lowercase safe-ID treatment for configured defaults and their payload filenames. Strict canonical normalization is applied only to present `routes[].language` values; it does not rewrite ordinary-route locale behavior.
+
+Every present route language must already be canonical, must appear in `site.i18n.supportedLanguages` (string or `{ "code": "..." }` form), and must have a nonempty, trim-stable string `pageId`. Each `(pageId, language)` must be unique within its route source. Runtime Read validates the published site config and any in-snapshot metadata fallback before loading localized payloads and before returning maintenance or suspension fallbacks. Invalid, unsupported, noncanonical, malformed-page, or duplicate published values fail closed through the generic public `500` response without returning route content or private diagnostics.
+
 ## Content hub runtime metadata
 
 When `site-config.json` includes `contentHubs`, the runtime bundle includes a safe projection under `metadata.contentHubs`. The legacy projection is allowlisted to `hubId`, `name`, `defaultLanguage`, and `canonicalDraftDomain`; arbitrary nested authoring fields are not exposed. The returned `siteConfig` independently allowlists the fixed object fields in the public `TDraftSiteConfigPayload`, `TDraftSiteRuntimeConfig`, route, lifecycle, auth, data-source, API-action, and `TContentHubRuntimeConfig` contracts. Deliberately dynamic public maps such as `defaults` and data-source input values remain customizable, but sensitive key and value classes are removed recursively. JSON `null` remains a valid public value and is not confused with a blocked value.
 
 Dynamic Content Hub index hydration accepts at most four hubs per request and performs at most two DynamoDB queries of 200 items each for each article or taxonomy index. The worst case is therefore eight indexes, 16 DynamoDB queries, and 400 records per individual index. Article-package resolution reuses the hydrated public article identity, verifies its current published/public metadata with one exact item read, and consults the exact slug pointer only as a legacy bundle-key fallback; it does not query the article index again. Ordinary non-article routes do not attempt an article-package lookup. Hubs that outgrow this bounded compatibility path require a separately designed precomputed paginated index; Runtime Read does not perform unbounded table reads.
+
+When a missing Content Hub path changes from the requested locale to a fixed-language `/404`, Runtime Read reuses the request-scoped bounded metadata reads while rebuilding only the locale-specific public projection. The query limits above therefore do not double during final-route language resolution.
 
 ## Server-only package boundary
 
