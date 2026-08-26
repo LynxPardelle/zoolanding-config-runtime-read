@@ -234,6 +234,101 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.put_payload(prefix, domain, f"{page_id}/i18n/es.json", {"pageId": page_id, "lang": "es", "dictionary": {"title": f"{text} ES"}})
         self.put_payload(prefix, domain, f"{page_id}/i18n/en.json", {"pageId": page_id, "lang": "en", "dictionary": {"title": f"{text} EN"}})
 
+    def configure_fixed_language_routes(self):
+        routes = [
+            {"path": "/soft-landing-china/eng", "pageId": "soft-landing-china", "language": "en"},
+            {"path": "/soft-landing-china/zh", "pageId": "soft-landing-china", "language": "zh"},
+        ]
+        self.metadata["routes"].extend(dict(route) for route in routes)
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {
+                "defaultLanguage": "es",
+                "supportedLanguages": [
+                    {"code": "es", "label": "ES"},
+                    {"code": "en", "label": "EN"},
+                    {"code": "zh", "label": "中文"},
+                ],
+            }
+        }
+        site_config["routes"].extend(dict(route) for route in routes)
+        self.put_page("test-prefix", "pamelabetancourt.com", "soft-landing-china", "China campaign")
+        self.put_payload(
+            "test-prefix",
+            "pamelabetancourt.com",
+            "i18n/zh.json",
+            {"lang": "zh", "dictionary": {"shared": "共享"}},
+        )
+        self.put_payload(
+            "test-prefix",
+            "pamelabetancourt.com",
+            "soft-landing-china/i18n/zh.json",
+            {"pageId": "soft-landing-china", "lang": "zh", "dictionary": {"title": "中国业务落地"}},
+        )
+
+    def configure_fixed_not_found_route(self, language="en"):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {
+                "defaultLanguage": "es",
+                "supportedLanguages": ["es", "en", "zh"],
+            }
+        }
+        metadata_route = next((route for route in self.metadata["routes"] if route["path"] == "/404"), None)
+        if metadata_route is None:
+            metadata_route = {"path": "/404", "pageId": "not-found", "label": "Not found"}
+            self.metadata["routes"].append(metadata_route)
+        site_route = next(route for route in site_config["routes"] if route["path"] == "/404")
+        metadata_route["language"] = language
+        site_route["language"] = language
+        self.put_payload(
+            "test-prefix",
+            "pamelabetancourt.com",
+            "i18n/zh.json",
+            {"lang": "zh", "dictionary": {"shared": "共享"}},
+        )
+        self.put_payload(
+            "test-prefix",
+            "pamelabetancourt.com",
+            "not-found/i18n/zh.json",
+            {"pageId": "not-found", "lang": "zh", "dictionary": {"title": "未找到页面"}},
+        )
+
+    def assert_route_language_failure_is_public_and_generic(self, source, value):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {
+                "defaultLanguage": "es",
+                "supportedLanguages": ["es", "en", "zh"],
+            }
+        }
+        metadata_route = self.metadata["routes"][0]
+        site_route = site_config["routes"][0]
+        metadata_route.pop("language", None)
+        site_route.pop("language", None)
+        metadata_route["privateDiagnostics"] = "private-route-language-marker"
+        site_route["privateDiagnostics"] = "private-route-language-marker"
+        (metadata_route if source == "metadata" else site_route)["language"] = value
+        self.loaded_keys.clear()
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            response = self.handler.lambda_handler(
+                event("api.zoolandingpage.com.mx", domain="pamelabetancourt.com", environment="test"),
+                Context(),
+            )
+
+        body = parse(response)
+        serialized = response["body"] + output.getvalue()
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(body, {"ok": False, "error": "Internal error"})
+        self.assertNotIn("private-route-language-marker", serialized)
+        self.assertFalse(any("/i18n/" in key for key in self.loaded_keys))
+        self.assertEqual(
+            self.loaded_keys,
+            ["test-prefix/pamelabetancourt.com/site-config.json"],
+        )
+
     def test_test_alias_uses_test_published_pointer(self):
         response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
         body = parse(response)
@@ -490,6 +585,656 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["route"]["path"], "/blog/:categorySlug")
         self.assertFalse(body["metadata"]["notFound"])
 
+    def test_public_route_projection_preserves_validated_language(self):
+        projected = self.handler._public_route({
+            "path": "/soft-landing-china/eng",
+            "pageId": "soft-landing-china",
+            "language": "en",
+            "privateDiagnostics": "must-not-render",
+        })
+
+        self.assertEqual(projected, {
+            "path": "/soft-landing-china/eng",
+            "pageId": "soft-landing-china",
+            "language": "en",
+        })
+
+    def test_fixed_route_language_overrides_request_and_keeps_public_bundle_in_agreement(self):
+        self.configure_fixed_language_routes()
+
+        for path, conflicting_language, expected_language in (
+            ("/soft-landing-china/eng", "zh", "en"),
+            ("/soft-landing-china/zh", "en", "zh"),
+        ):
+            with self.subTest(path=path):
+                loaded_before = len(self.loaded_keys)
+                response = self.handler.lambda_handler(
+                    event(
+                        "api.zoolandingpage.com.mx",
+                        path=path,
+                        lang=conflicting_language,
+                        domain="pamelabetancourt.com",
+                        environment="test",
+                    ),
+                    Context(),
+                )
+                body = parse(response)
+                matching_route = next(route for route in body["siteConfig"]["routes"] if route["path"] == path)
+                request_keys = self.loaded_keys[loaded_before:]
+
+                self.assertEqual(response["statusCode"], 200)
+                self.assertEqual(body["pageId"], "soft-landing-china")
+                self.assertEqual(body["lang"], expected_language)
+                self.assertEqual(body["i18n"]["lang"], expected_language)
+                self.assertEqual(body["route"]["language"], expected_language)
+                self.assertEqual(matching_route["language"], expected_language)
+                self.assertTrue(any(key.endswith(f"/i18n/{expected_language}.json") for key in request_keys))
+                self.assertFalse(any(key.endswith(f"/i18n/{conflicting_language}.json") for key in request_keys))
+
+    def test_language_free_routes_keep_request_then_site_default_precedence(self):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {
+                "defaultLanguage": "es",
+                "supportedLanguages": ["es", "en"],
+            }
+        }
+
+        explicit_response = self.handler.lambda_handler(
+            event(
+                "api.zoolandingpage.com.mx",
+                lang="en",
+                domain="pamelabetancourt.com",
+                environment="test",
+            ),
+            Context(),
+        )
+        default_response = self.handler.lambda_handler(
+            event(
+                "api.zoolandingpage.com.mx",
+                lang=None,
+                domain="pamelabetancourt.com",
+                environment="test",
+            ),
+            Context(),
+        )
+
+        self.assertEqual(parse(explicit_response)["lang"], "en")
+        self.assertEqual(parse(default_response)["lang"], "es")
+
+    def test_unpublished_future_metadata_route_does_not_break_published_home(self):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {
+                "defaultLanguage": "es",
+                "supportedLanguages": ["es"],
+            }
+        }
+        self.metadata["routes"].extend([
+            {"path": "/future", "pageId": "future", "language": "fr"},
+            {"path": "/future/:slug", "pageId": "future-detail", "language": "fr"},
+        ])
+        self.metadata["routes"][0]["language"] = "fr"
+        self.metadata["draft"] = {
+            "versionId": "future-draft-not-published",
+            "prefix": "future-draft-prefix",
+        }
+        self.loaded_keys.clear()
+
+        response = self.handler.lambda_handler(
+            event(
+                "api.zoolandingpage.com.mx",
+                lang=None,
+                domain="pamelabetancourt.com",
+                environment="test",
+            ),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["versionId"], "test-v1")
+        self.assertEqual(body["pageId"], "default")
+        self.assertEqual(body["lang"], "es")
+        self.assertEqual(body["i18n"]["lang"], "es")
+        self.assertEqual(body["route"]["path"], "/")
+        self.assertNotIn("/future", {route["path"] for route in body["siteConfig"]["routes"]})
+        self.assertFalse(any("/future/" in key or "/future-detail/" in key for key in self.loaded_keys))
+
+    def test_unpublished_future_metadata_paths_do_not_resolve_before_pointer_publish(self):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {
+                "defaultLanguage": "es",
+                "supportedLanguages": ["es"],
+            }
+        }
+        self.metadata["routes"].extend([
+            {"path": "/future", "pageId": "future", "language": "fr"},
+            {"path": "/future/:slug", "pageId": "future-detail", "language": "fr"},
+        ])
+        self.metadata["routes"][0]["language"] = "fr"
+        self.metadata["draft"] = {
+            "versionId": "future-draft-not-published",
+            "prefix": "future-draft-prefix",
+        }
+
+        for path in ("/future", "/future/item"):
+            with self.subTest(path=path):
+                self.loaded_keys.clear()
+                response = self.handler.lambda_handler(
+                    event(
+                        "api.zoolandingpage.com.mx",
+                        path=path,
+                        lang="es",
+                        domain="pamelabetancourt.com",
+                        environment="test",
+                    ),
+                    Context(),
+                )
+                body = parse(response)
+
+                self.assertEqual(response["statusCode"], 200)
+                self.assertEqual(body["versionId"], "test-v1")
+                self.assertEqual(body["pageId"], "not-found")
+                self.assertEqual(body["metadata"]["statusCode"], 404)
+                self.assertTrue(body["metadata"]["notFound"])
+                self.assertEqual(body["route"]["path"], "/404")
+                self.assertNotIn(path, {route["path"] for route in body["siteConfig"]["routes"]})
+                self.assertFalse(any("/future/" in key or "/future-detail/" in key for key in self.loaded_keys))
+
+    def test_unpublished_future_metadata_content_hub_is_not_exposed_or_resolved(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["runtime"] = {
+            "contentHubs": [{
+                "hubId": "main",
+                "routeBasePath": "/blog",
+                "articlePathPattern": "/blog/:categorySlug/:articleSlug",
+                "defaultLocale": "es",
+                "locales": ["es"],
+                "publicArticles": [],
+                "publicTaxonomy": [],
+            }]
+        }
+        self.metadata["defaultPageId"] = "future-default"
+        self.metadata["contentHubs"] = [{
+            "hubId": "future-hub",
+            "name": "Future hub",
+            "defaultLanguage": "fr",
+            "canonicalDraftDomain": "future.example",
+        }]
+        self.metadata["draft"] = {
+            "versionId": "future-draft-not-published",
+            "prefix": "future-draft-prefix",
+        }
+
+        response = self.handler.lambda_handler(
+            event(
+                "api.zoolandingpage.com.mx",
+                lang="es",
+                domain="pamelabetancourt.com",
+                environment="test",
+            ),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(
+            [hub["hubId"] for hub in body["metadata"]["contentHubs"]],
+            ["main"],
+        )
+        self.assertEqual(
+            [hub["hubId"] for hub in body["siteConfig"]["contentHubs"]],
+            ["main"],
+        )
+        self.assertEqual(
+            {query["pk"] for query in self.content_hub_queries},
+            {"HUB#main"},
+        )
+        self.assertNotIn("future-hub", response["body"])
+
+    def test_unpublished_future_metadata_default_does_not_drive_legacy_published_home(self):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config.pop("defaultPageId")
+        site_config["routes"] = [
+            route
+            for route in site_config["routes"]
+            if route["path"] != "/"
+        ]
+        self.metadata["defaultPageId"] = "future-default"
+        self.metadata["contentHubs"] = [{
+            "hubId": "future-hub",
+            "name": "Future hub",
+            "defaultLanguage": "fr",
+            "canonicalDraftDomain": "future.example",
+        }]
+        self.metadata["draft"] = {
+            "versionId": "future-draft-not-published",
+            "prefix": "future-draft-prefix",
+        }
+        self.loaded_keys.clear()
+
+        response = self.handler.lambda_handler(
+            event(
+                "api.zoolandingpage.com.mx",
+                lang="es",
+                domain="pamelabetancourt.com",
+                environment="test",
+            ),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["versionId"], "test-v1")
+        self.assertEqual(body["pageId"], "default")
+        self.assertEqual(body["metadata"]["statusCode"], 200)
+        self.assertFalse(body["metadata"]["notFound"])
+        self.assertFalse(any("/future-default/" in key for key in self.loaded_keys))
+
+    def test_legacy_and_matching_pointer_metadata_keep_derived_fallbacks(self):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config.pop("defaultPageId")
+        site_config.pop("contentHubs")
+        site_config["routes"] = [
+            route
+            for route in site_config["routes"]
+            if route["path"] != "/"
+        ]
+        self.metadata["defaultPageId"] = "metadata-default"
+        self.metadata["contentHubs"] = [{
+            "hubId": "metadata-hub",
+            "name": "Metadata hub",
+            "defaultLanguage": "es",
+            "canonicalDraftDomain": "pamelabetancourt.com",
+        }]
+        self.put_page("test-prefix", "pamelabetancourt.com", "metadata-default", "Metadata default")
+
+        for mode, draft_pointer in (
+            ("legacy", None),
+            ("matching", {"versionId": "test-v1", "prefix": "test-prefix"}),
+        ):
+            with self.subTest(mode=mode):
+                if draft_pointer is None:
+                    self.metadata.pop("draft", None)
+                else:
+                    self.metadata["draft"] = draft_pointer
+
+                response = self.handler.lambda_handler(
+                    event(
+                        "api.zoolandingpage.com.mx",
+                        lang="es",
+                        domain="pamelabetancourt.com",
+                        environment="test",
+                    ),
+                    Context(),
+                )
+                body = parse(response)
+
+                self.assertEqual(response["statusCode"], 200)
+                self.assertEqual(body["pageId"], "metadata-default")
+                self.assertEqual(
+                    [hub["hubId"] for hub in body["metadata"]["contentHubs"]],
+                    ["metadata-hub"],
+                )
+
+    def test_exact_site_config_route_wins_before_older_metadata_parameter_route(self):
+        self.metadata["routes"].append({
+            "path": "/soft-landing-china/:locale",
+            "pageId": "legacy-parameter-shell",
+        })
+        self.put_page("test-prefix", "pamelabetancourt.com", "legacy-parameter-shell", "Legacy shell")
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {"defaultLanguage": "es", "supportedLanguages": ["es", "en", "zh"]}
+        }
+        site_config["routes"].append({
+            "path": "/soft-landing-china/eng",
+            "pageId": "soft-landing-china",
+            "language": "en",
+        })
+        self.put_page("test-prefix", "pamelabetancourt.com", "soft-landing-china", "China campaign")
+
+        response = self.handler.lambda_handler(
+            event(
+                "api.zoolandingpage.com.mx",
+                path="/soft-landing-china/eng",
+                lang="zh",
+                domain="pamelabetancourt.com",
+                environment="test",
+            ),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["pageId"], "soft-landing-china")
+        self.assertEqual(body["route"]["path"], "/soft-landing-china/eng")
+        self.assertEqual(body["route"]["language"], "en")
+        self.assertEqual(body["lang"], "en")
+
+    def test_older_metadata_route_without_language_is_backfilled_from_exact_site_route(self):
+        self.configure_fixed_language_routes()
+        metadata_route = next(
+            route for route in self.metadata["routes"] if route["path"] == "/soft-landing-china/eng"
+        )
+        metadata_route.pop("language")
+
+        response = self.handler.lambda_handler(
+            event(
+                "api.zoolandingpage.com.mx",
+                path="/soft-landing-china/eng",
+                lang="zh",
+                domain="pamelabetancourt.com",
+                environment="test",
+            ),
+            Context(),
+        )
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["route"]["language"], "en")
+        self.assertEqual(body["lang"], "en")
+
+    def test_final_fixed_not_found_route_overrides_request_before_localized_reads(self):
+        self.configure_fixed_not_found_route("en")
+        self.loaded_keys.clear()
+
+        response = self.handler.lambda_handler(
+            event(
+                "api.zoolandingpage.com.mx",
+                path="/missing",
+                lang="zh",
+                domain="pamelabetancourt.com",
+                environment="test",
+            ),
+            Context(),
+        )
+        body = parse(response)
+        public_route = next(route for route in body["siteConfig"]["routes"] if route["path"] == "/404")
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["metadata"]["statusCode"], 404)
+        self.assertEqual(body["lang"], "en")
+        self.assertEqual(body["i18n"]["lang"], "en")
+        self.assertEqual(body["route"]["language"], "en")
+        self.assertEqual(public_route["language"], "en")
+        self.assertTrue(any(key.endswith("/i18n/en.json") for key in self.loaded_keys))
+        self.assertFalse(any(key.endswith("/i18n/zh.json") for key in self.loaded_keys))
+
+    def test_missing_content_hub_paths_recompute_language_from_final_fixed_404(self):
+        self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
+        self.configure_fixed_not_found_route("en")
+        self.metadata["routes"].extend([
+            {"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"},
+            {"path": "/blog/:categorySlug", "pageId": "blog-category"},
+        ])
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["routes"].extend([
+            {"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"},
+            {"path": "/blog/:categorySlug", "pageId": "blog-category"},
+        ])
+        site_config["runtime"] = {
+            "contentHubs": [{
+                "hubId": "main",
+                "routeBasePath": "/blog",
+                "articlePathPattern": "/blog/:categorySlug/:articleSlug",
+                "defaultLocale": "es",
+                "locales": ["es", "en", "zh"],
+                "publicArticles": [],
+                "publicTaxonomy": [],
+            }]
+        }
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
+        self.put_page("test-prefix", "pamelabetancourt.com", "blog-category", "Category shell")
+
+        for path in ("/blog/web/missing-article", "/blog/missing-category"):
+            with self.subTest(path=path):
+                self.loaded_keys.clear()
+                queries_before = len(self.content_hub_queries)
+                response = self.handler.lambda_handler(
+                    event(
+                        "api.zoolandingpage.com.mx",
+                        path=path,
+                        lang="zh",
+                        domain="pamelabetancourt.com",
+                        environment="test",
+                    ),
+                    Context(),
+                )
+                body = parse(response)
+
+                self.assertEqual(response["statusCode"], 200)
+                self.assertEqual(body["pageId"], "not-found")
+                self.assertEqual(body["metadata"]["statusCode"], 404)
+                self.assertEqual(body["lang"], "en")
+                self.assertEqual(body["i18n"]["lang"], "en")
+                self.assertEqual(body["route"]["language"], "en")
+                self.assertTrue(any(key.endswith("/i18n/en.json") for key in self.loaded_keys))
+                self.assertFalse(any(key.endswith("/i18n/zh.json") for key in self.loaded_keys))
+                self.assertEqual(len(self.content_hub_queries) - queries_before, 2)
+
+    def test_language_free_route_preserves_legacy_default_locale_filename_behavior(self):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+
+        for configured_default, expected_runtime_language in (
+            ("pt-BR", "pt-br"),
+            ("pt_BR", "pt_br"),
+        ):
+            with self.subTest(configured_default=configured_default):
+                site_config["site"] = {
+                    "i18n": {
+                        "defaultLanguage": configured_default,
+                        "supportedLanguages": [configured_default],
+                    }
+                }
+                self.put_payload(
+                    "test-prefix",
+                    "pamelabetancourt.com",
+                    f"i18n/{expected_runtime_language}.json",
+                    {"lang": expected_runtime_language, "dictionary": {"shared": "Compartilhado"}},
+                )
+                self.put_payload(
+                    "test-prefix",
+                    "pamelabetancourt.com",
+                    f"default/i18n/{expected_runtime_language}.json",
+                    {"pageId": "default", "lang": expected_runtime_language, "dictionary": {"title": "Início"}},
+                )
+                self.loaded_keys.clear()
+
+                response = self.handler.lambda_handler(
+                    event(
+                        "api.zoolandingpage.com.mx",
+                        lang=None,
+                        domain="pamelabetancourt.com",
+                        environment="test",
+                    ),
+                    Context(),
+                )
+                body = parse(response)
+
+                self.assertEqual(response["statusCode"], 200)
+                self.assertEqual(body["lang"], expected_runtime_language)
+                self.assertEqual(body["i18n"]["lang"], expected_runtime_language)
+                self.assertTrue(any(key.endswith(f"/i18n/{expected_runtime_language}.json") for key in self.loaded_keys))
+
+    def test_fixed_route_language_requires_trimmed_nonempty_string_page_id(self):
+        invalid_page_ids = (None, "", " ", " campaign ", 7, ["campaign"])
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {"defaultLanguage": "es", "supportedLanguages": ["es", "en"]}
+        }
+
+        for source in ("metadata", "site-config"):
+            for page_id in invalid_page_ids:
+                with self.subTest(source=source, page_id=page_id):
+                    self.metadata["routes"] = [{
+                        "path": "/",
+                        "pageId": "default",
+                        "language": "en",
+                    }]
+                    site_config["routes"] = [{
+                        "path": "/",
+                        "pageId": "default",
+                        "language": "en",
+                    }]
+                    selected_route = self.metadata["routes"][0] if source == "metadata" else site_config["routes"][0]
+                    selected_route["pageId"] = page_id
+                    self.loaded_keys.clear()
+                    output = io.StringIO()
+
+                    with redirect_stdout(output):
+                        response = self.handler.lambda_handler(
+                            event(
+                                "api.zoolandingpage.com.mx",
+                                lang="zh",
+                                domain="pamelabetancourt.com",
+                                environment="test",
+                            ),
+                            Context(),
+                        )
+
+                    self.assertEqual(response["statusCode"], 500)
+                    self.assertEqual(parse(response), {"ok": False, "error": "Internal error"})
+                    self.assertFalse(any("/i18n/" in key for key in self.loaded_keys))
+
+    def test_inactive_lifecycle_validates_route_languages_before_fallback(self):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {"defaultLanguage": "es", "supportedLanguages": ["es", "en"]}
+        }
+
+        for status in ("maintenance", "suspended"):
+            for source in ("metadata", "site-config"):
+                with self.subTest(status=status, source=source):
+                    self.metadata["lifecycle"] = {"status": status}
+                    self.metadata["routes"] = [{
+                        "path": "/campaign",
+                        "pageId": "campaign",
+                        "language": "en",
+                        "privateDiagnostics": "private-lifecycle-route-marker",
+                    }]
+                    site_config["routes"] = [{
+                        "path": "/campaign",
+                        "pageId": "campaign",
+                        "language": "en",
+                        "privateDiagnostics": "private-lifecycle-route-marker",
+                    }]
+                    selected_route = self.metadata["routes"][0] if source == "metadata" else site_config["routes"][0]
+                    selected_route["language"] = "fr"
+                    self.loaded_keys.clear()
+                    output = io.StringIO()
+
+                    with redirect_stdout(output):
+                        response = self.handler.lambda_handler(
+                            event(
+                                "api.zoolandingpage.com.mx",
+                                path="/campaign",
+                                domain="pamelabetancourt.com",
+                                environment="test",
+                            ),
+                            Context(),
+                        )
+
+                    serialized = response["body"] + output.getvalue()
+                    self.assertEqual(response["statusCode"], 500)
+                    self.assertEqual(parse(response), {"ok": False, "error": "Internal error"})
+                    self.assertNotIn("private-lifecycle-route-marker", serialized)
+                    self.assertFalse(any("/i18n/" in key for key in self.loaded_keys))
+                    self.assertEqual(
+                        self.loaded_keys,
+                        ["test-prefix/pamelabetancourt.com/site-config.json"],
+                    )
+
+    def test_invalid_route_languages_fail_closed_before_localized_payload_reads(self):
+        invalid_values = (None, "", " ", "EN", "en_US", "en--US", "english", "fr")
+
+        for source in ("metadata", "site-config"):
+            for value in invalid_values:
+                with self.subTest(source=source, value=value):
+                    self.assert_route_language_failure_is_public_and_generic(source, value)
+
+    def test_route_locale_grammar_matches_authoring_contract(self):
+        accepted = (
+            ("en", "en"),
+            ("zh", {"code": "zh"}),
+            ("pt-BR", {"code": "PT-br"}),
+            ("zh-Hans", "zh-Hans"),
+            ("zh-Hans-CN", "zh-Hans-CN"),
+            ("es-419", "es-419"),
+        )
+        for language, supported_entry in accepted:
+            with self.subTest(accepted=language):
+                site_config = {
+                    "site": {"i18n": {"supportedLanguages": [supported_entry]}},
+                    "routes": [{"path": "/campaign", "pageId": "campaign", "language": language}],
+                }
+                self.handler._validate_route_languages(
+                    site_config,
+                    self.handler._supported_site_languages(site_config),
+                )
+
+        rejected = (
+            ("", ["en"]),
+            (" ", ["en"]),
+            (None, ["en"]),
+            ("EN", ["EN"]),
+            ("en_US", ["en_US"]),
+            ("en--US", ["en--US"]),
+            ("english", ["english"]),
+            ("fr", ["en"]),
+        )
+        for language, supported_languages in rejected:
+            with self.subTest(rejected=language):
+                site_config = {
+                    "site": {"i18n": {"supportedLanguages": supported_languages}},
+                    "routes": [{"path": "/campaign", "pageId": "campaign", "language": language}],
+                }
+                with self.assertRaises(ValueError):
+                    self.handler._validate_route_languages(
+                        site_config,
+                        self.handler._supported_site_languages(site_config),
+                    )
+
+    def test_duplicate_page_language_pairs_fail_closed_in_each_route_source(self):
+        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config["site"] = {
+            "i18n": {"defaultLanguage": "es", "supportedLanguages": ["es", "en", "zh"]}
+        }
+
+        for source in ("metadata", "site-config"):
+            with self.subTest(source=source):
+                self.metadata["routes"] = [{"path": "/", "pageId": "default"}]
+                site_config["routes"] = [{"path": "/", "pageId": "default"}]
+                duplicate_routes = [
+                    {"path": "/soft-landing-china/eng", "pageId": "soft-landing-china", "language": "en"},
+                    {"path": "/soft-landing-china/en", "pageId": "soft-landing-china", "language": "en"},
+                ]
+                if source == "metadata":
+                    self.metadata["routes"].extend(duplicate_routes)
+                    site_config["routes"].extend([
+                        {"path": route["path"], "pageId": route["pageId"]}
+                        for route in duplicate_routes
+                    ])
+                else:
+                    site_config["routes"].extend(duplicate_routes)
+                self.loaded_keys.clear()
+
+                response = self.handler.lambda_handler(
+                    event(
+                        "api.zoolandingpage.com.mx",
+                        domain="pamelabetancourt.com",
+                        environment="test",
+                    ),
+                    Context(),
+                )
+
+                self.assertEqual(response["statusCode"], 500)
+                self.assertEqual(parse(response), {"ok": False, "error": "Internal error"})
+                self.assertFalse(any("/i18n/" in key for key in self.loaded_keys))
+
     def test_runtime_bundle_exposes_public_content_hub_metadata(self):
         response = self.handler.lambda_handler(event("pamelabetancourt.com"), Context())
         body = parse(response)
@@ -707,6 +1452,24 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertNotIn("serverOnly", serialized)
         self.assertNotIn("serverPolicy", serialized)
         self.assertNotIn("must-not-render", serialized)
+
+    def test_lifecycle_fallback_removes_fixed_languages_from_english_only_routes(self):
+        bundle = self.handler._fallback_bundle(
+            "example.com",
+            "maintenance",
+            {
+                "aliases": ["example.com"],
+                "routes": [
+                    {"path": "/campaign/eng", "pageId": "campaign", "language": "en"},
+                    {"path": "/campaign/zh", "pageId": "campaign", "language": "zh"},
+                ],
+            },
+            {"status": "maintenance"},
+        )
+
+        self.assertEqual(bundle["siteConfig"]["site"]["i18n"]["supportedLanguages"], ["en"])
+        self.assertTrue(bundle["siteConfig"]["routes"])
+        self.assertTrue(all("language" not in route for route in bundle["siteConfig"]["routes"]))
 
     def test_runtime_bundle_hydrates_public_content_hub_indexes_from_metadata_table(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
