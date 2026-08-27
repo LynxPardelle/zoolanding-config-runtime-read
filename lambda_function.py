@@ -76,6 +76,13 @@ CONTENT_HUB_UNSAFE_VALUE_RE = re.compile(
     r"AWSAccessKeyId=|Signature=|Expires=|ssm:/|secretsmanager:/)",
     re.I,
 )
+PUBLIC_FONT_FAMILY_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[ -][A-Za-z0-9]+)*")
+PUBLIC_FONT_SOURCE_RE = re.compile(
+    r"(?!.*[\x00-\x20\x7f])(?:/(?!/)|https://[A-Za-z0-9.-]+/)"
+    r"(?!\.{1,2}/)(?!.*[/]\.{1,2}/)[A-Za-z0-9._/-]+\.woff2"
+)
+PUBLIC_FONT_WEIGHT_RE = re.compile(r"(?:[1-9][0-9]{0,2}|1000)(?: (?:[1-9][0-9]{0,2}|1000))?")
+PUBLIC_FONT_KEYS = frozenset({"family", "src", "weight", "style"})
 _PUBLIC_VALUE_BLOCKED = object()
 
 
@@ -1601,6 +1608,41 @@ def _project_public_runtime(runtime: Any) -> Dict[str, Any]:
     return public_runtime
 
 
+def _public_font_faces(value: Any) -> Optional[list[Dict[str, str]]]:
+    # Match the shared draft-font contract; never fetch a font from this service.
+    # Reject the complete optional list rather than publishing a partial variant set.
+    if not isinstance(value, list) or len(value) > 8:
+        return None
+    ranges: list[tuple[str, str, int, int]] = []
+    for face in value:
+        if not isinstance(face, dict) or not set(face).issubset(PUBLIC_FONT_KEYS):
+            return None
+        family, source = face.get("family"), face.get("src")
+        weight, style = face.get("weight", "400"), face.get("style", "normal")
+        if not isinstance(family, str) or len(family) > 80 or not PUBLIC_FONT_FAMILY_RE.fullmatch(family):
+            return None
+        if not isinstance(source, str) or len(source) > 2048 or not PUBLIC_FONT_SOURCE_RE.fullmatch(source):
+            return None
+        if style not in ("normal", "italic"):
+            return None
+        if not isinstance(weight, str) or not PUBLIC_FONT_WEIGHT_RE.fullmatch(weight):
+            return None
+        bounds = [int(part) for part in weight.split(" ")]
+        lower, upper = bounds[0], bounds[-1]
+        if lower > upper:
+            return None
+        identity = family.lower()
+        if any(identity == previous_family and style == previous_style
+               and lower <= previous_upper and upper >= previous_lower
+               for previous_family, previous_style, previous_lower, previous_upper in ranges):
+            return None
+        ranges.append((identity, style, lower, upper))
+    # Retain the existing public-value filter without introducing trusted exceptions.
+    # Do not inject defaults: published descriptors must retain their exact shape.
+    public_faces = _public_content_hub_payload(value)
+    return public_faces if public_faces == value else None
+
+
 def _public_site_config(site_config: Dict[str, Any]) -> Dict[str, Any]:
     public_config: Dict[str, Any] = {}
     for key in ("version", "domain", "aliases", "defaultPageId", "notFoundPageId", "defaults"):
@@ -1641,10 +1683,15 @@ def _public_site_config(site_config: Dict[str, Any]) -> Dict[str, Any]:
             public_config["runtime"] = runtime
 
     if "site" in site_config:
+        raw_site = site_config.get("site")
         site = _project_public_object(
-            site_config.get("site"),
+            raw_site,
             ("appIdentity", "theme", "i18n", "icons", "seo", "searchConsole", "hostOverrides"),
         )
+        if isinstance(raw_site, dict) and "fonts" in raw_site:
+            fonts = _public_font_faces(raw_site["fonts"])
+            if fonts is not None:
+                site["fonts"] = fonts
         if site:
             public_config["site"] = site
 

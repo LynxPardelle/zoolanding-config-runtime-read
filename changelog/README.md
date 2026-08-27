@@ -6,6 +6,7 @@ Use [../README.md](../README.md), code, tests, SAM configuration, and workflows 
 
 ## Migrated History
 
+- [Public draft font-face projection, 2026-08-27 CT](2026-08-27-public-draft-font-faces.md)
 - [Fixed-language route resolution, 2026-08-24 CT](2026-08-24-fixed-route-language.md)
 - [Runtime Read public method throttle, 2026-07-16 CT](2026-07-16-runtime-read-public-throttle.md)
 - [Runtime Read bounded public projection and reads, 2026-07-16 CT](2026-07-16-runtime-read-bounded-public-projection.md)
