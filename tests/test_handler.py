@@ -1247,6 +1247,26 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertNotIn("allowedDraftDomains", body["metadata"]["contentHubs"][0])
         self.assertNotIn("serverOnly", body["metadata"]["contentHubs"][0])
 
+    def test_runtime_bundle_preserves_public_draft_font_faces(self):
+        fonts = [
+            {"family": family, "src": f"/assets/example.com/fonts/{file}.woff2", "weight": weight, "style": "normal"}
+            for family, file, weight in (
+                ("Newsreader", "newsreader-400", "400"),
+                ("Newsreader", "newsreader-500", "500"),
+                ("Open Sans", "open-sans-400", "400"),
+                ("Open Sans", "open-sans-600", "600"),
+            )
+        ]
+        self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]["site"] = {"fonts": fonts}
+
+        response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body.get("siteConfig", {}).get("site", {}).get("fonts"), fonts)
+        self.assertEqual(body["versionId"], "test-v1")
+        self.assertFalse(any(key.endswith(".woff2") for key in self.loaded_keys))
+
     def test_public_site_config_is_deny_by_default_for_runtime_branches(self):
         projected = self.handler._public_site_config({
             "version": 1,
