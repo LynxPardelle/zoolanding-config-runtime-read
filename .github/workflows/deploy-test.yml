@@ -299,7 +299,7 @@ jobs:
         run: |
           set -euo pipefail
           expected_code_sha256="$(tr -d '\r\n' < .aws-sam/release/lambda-code-sha256.txt)"
-          function_name="$(aws cloudformation describe-stacks --stack-name zoolanding-config-runtime-read-test --query \"Stacks[0].Outputs[?OutputKey=='FunctionName'].OutputValue | [0]\" --output text --no-cli-pager)"
+          function_name="$(aws cloudformation describe-stacks --stack-name zoolanding-config-runtime-read-test --query "Stacks[0].Outputs[?OutputKey=='FunctionName'].OutputValue | [0]" --output text --no-cli-pager)"
           [[ -n "$function_name" && "$function_name" != "None" ]]
           live_version="$(aws lambda get-alias --function-name "$function_name" --name live --query FunctionVersion --output text --no-cli-pager)"
           [[ "$live_version" =~ ^[1-9][0-9]*$ ]]

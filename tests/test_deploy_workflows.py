@@ -424,6 +424,7 @@ class DeployWorkflowTests(unittest.TestCase):
                 if exact_release:
                     self.assertIn("aws cloudformation describe-stacks", deploy_section)
                     self.assertIn("OutputKey=='FunctionName'", deploy_section)
+                    self.assertNotIn('--query \\"', deploy_section)
                     self.assertNotIn("describe-stack-resource", deploy_section)
                     self.assertIn("aws lambda get-alias", deploy_section)
                     self.assertIn("aws lambda get-function-configuration", deploy_section)
