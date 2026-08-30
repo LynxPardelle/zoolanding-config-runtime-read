@@ -172,14 +172,14 @@ class DeployWorkflowTests(unittest.TestCase):
 
     def test_deploy_workflows_reproduce_samconfig_with_explicit_parameters(self):
         expected_config_envs = {
-            "deploy-test.yml": "test",
-            "deploy-production.yml": "prod",
+            "deploy-test.yml": ("test", ".aws-sam/release/template.yaml"),
+            "deploy-production.yml": ("prod", ".aws-sam/build/template.yaml"),
         }
 
         with (REPO_ROOT / "samconfig.toml").open("rb") as handle:
             samconfig = tomllib.load(handle)
 
-        for workflow_name, config_env in expected_config_envs.items():
+        for workflow_name, (config_env, template_path) in expected_config_envs.items():
             with self.subTest(workflow=workflow_name):
                 workflow = REPO_ROOT / ".github" / "workflows" / workflow_name
                 text = workflow.read_text(encoding="utf-8")
@@ -202,7 +202,7 @@ class DeployWorkflowTests(unittest.TestCase):
                 tokens = shlex.split(command)
                 expected_before_parameters = [
                     "sam", "deploy",
-                    "--template-file", ".aws-sam/build/template.yaml",
+                    "--template-file", template_path,
                     "--stack-name", parameters["stack_name"],
                     "--region", parameters["region"],
                     "--resolve-s3",
@@ -315,7 +315,18 @@ class DeployWorkflowTests(unittest.TestCase):
                     ".aws-sam/build/ConfigRuntimeReadFunction",
                     validate_section,
                 )
-                self.assertIn("build-manifest.sha256", validate_section)
+                exact_release = workflow_name == "deploy-test.yml"
+                if exact_release:
+                    self.assertIn(
+                        "python tools/build_lambda_artifact.py --package-test-release "
+                        ".aws-sam/build/ConfigRuntimeReadFunction "
+                        "--sam-template .aws-sam/build/template.yaml",
+                        validate_section,
+                    )
+                    self.assertIn("release-manifest.sha256", validate_section)
+                else:
+                    self.assertNotIn("--package-test-release", validate_section)
+                    self.assertIn("build-manifest.sha256", validate_section)
                 self.assertIn("outputs:", validate_section)
                 self.assertIn("artifact_id: ${{ steps.upload.outputs.artifact-id }}", validate_section)
                 self.assertIn("artifact_name: ${{ steps.artifact_metadata.outputs.artifact_name }}", validate_section)
@@ -326,14 +337,20 @@ class DeployWorkflowTests(unittest.TestCase):
                 self.assertEqual(text.count(artifact_name), 1)
                 self.assertIn("include-hidden-files: true", validate_section)
                 self.assertIn("retention-days: 1", validate_section)
-                self.assertIn(
+                expected_artifact_paths = (
+                    "path: |\n"
+                    "            .aws-sam/release/template.yaml\n"
+                    "            .aws-sam/release/runtime-read.zip\n"
+                    "            .aws-sam/release/lambda-code-sha256.txt\n"
+                    "            .aws-sam/release-manifest.sha256"
+                    if exact_release else
                     "path: |\n"
                     "            .aws-sam/build/template.yaml\n"
                     "            .aws-sam/build/ConfigRuntimeReadFunction/lambda_function.py\n"
                     "            .aws-sam/build/ConfigRuntimeReadFunction/zoolanding_lambda_common.py\n"
-                    "            .aws-sam/build-manifest.sha256",
-                    validate_section,
+                    "            .aws-sam/build-manifest.sha256"
                 )
+                self.assertIn(expected_artifact_paths, validate_section)
                 self.assertNotIn("            .aws-sam/build/\n", validate_section)
                 self.assertNotIn(".env", validate_section)
                 self.assertNotIn("samconfig.toml", validate_section)
@@ -371,11 +388,19 @@ class DeployWorkflowTests(unittest.TestCase):
                     "printf 'artifact_id=%s\\nartifact_name=%s\\nmanifest_digest=%s\\n'",
                     deploy_section,
                 )
-                self.assertIn("sha256sum --check --strict ../build-manifest.sha256", deploy_section)
+                expected_manifest = "release-manifest.sha256" if exact_release else "build-manifest.sha256"
+                self.assertIn(f"sha256sum --check --strict ../{expected_manifest}", deploy_section)
                 self.assertIn('[[ "$EXPECTED_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]', deploy_section)
                 self.assertIn('test "$actual_manifest_digest" = "$EXPECTED_MANIFEST_DIGEST"', deploy_section)
+                if exact_release:
+                    self.assertIn("openssl dgst -sha256 -binary", deploy_section)
+                    self.assertIn('test "$actual_code_sha256" = "$expected_code_sha256"', deploy_section)
+                else:
+                    self.assertNotIn("openssl dgst -sha256 -binary", deploy_section)
                 self.assertNotIn("python -m unittest", deploy_section)
                 self.assertNotIn("sam build", deploy_section)
+                self.assertNotIn(" zip ", deploy_section)
+                self.assertNotIn("zip -", deploy_section)
                 self.assertNotIn(SETUP_PYTHON_ACTION, deploy_section)
                 self.assertNotIn(CHECKOUT_ACTION, deploy_section)
                 self.assertNotIn(SETUP_NODE_ACTION, deploy_section)
@@ -392,7 +417,20 @@ class DeployWorkflowTests(unittest.TestCase):
                 self.assertIn("event.after !== sha", deploy_section)
                 self.assertIn("context.eventName !== 'workflow_dispatch'", deploy_section)
                 self.assertIn("branch.commit.sha !== sha", deploy_section)
-                self.assertIn("--template-file .aws-sam/build/template.yaml", deploy_section)
+                expected_template = (
+                    ".aws-sam/release/template.yaml" if exact_release else ".aws-sam/build/template.yaml"
+                )
+                self.assertIn(f"--template-file {expected_template}", deploy_section)
+                if exact_release:
+                    self.assertIn("aws cloudformation describe-stacks", deploy_section)
+                    self.assertIn("OutputKey=='FunctionName'", deploy_section)
+                    self.assertNotIn('--query \\"', deploy_section)
+                    self.assertNotIn("describe-stack-resource", deploy_section)
+                    self.assertIn("aws lambda get-alias", deploy_section)
+                    self.assertIn("aws lambda get-function-configuration", deploy_section)
+                else:
+                    self.assertNotIn("aws lambda get-alias", deploy_section)
+                    self.assertNotIn("aws lambda get-function-configuration", deploy_section)
 
                 download_start = text.index(DOWNLOAD_ARTIFACT_ACTION, deploy_index)
                 download_end = text.index("\n      - name:", download_start)
@@ -439,6 +477,9 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertIn("same workflow run", deploy)
         self.assertIn("does not check out or execute repository code", deploy)
         self.assertIn("one day", deploy)
+        self.assertIn("`runtime-read.zip`", deploy)
+        self.assertIn("Lambda `CodeSha256`", deploy)
+        self.assertIn("stable `live` alias", deploy)
         self.assertIn("explicit parameters", deploy)
         self.assertIn("cannot expand IAM permissions", deploy)
         self.assertIn("permissions boundary and CloudFormation execution role", deploy)
