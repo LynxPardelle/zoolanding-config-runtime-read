@@ -6,6 +6,7 @@ Use [../README.md](../README.md), code, tests, SAM configuration, and workflows 
 
 ## Migrated History
 
+- [Immutable Runtime Read release artifact and live alias, 2026-08-30 CT](2026-08-30-immutable-runtime-release.md)
 - [Public draft font-face projection, 2026-08-27 CT](2026-08-27-public-draft-font-faces.md)
 - [Fixed-language route resolution, 2026-08-24 CT](2026-08-24-fixed-route-language.md)
 - [Runtime Read public method throttle, 2026-07-16 CT](2026-07-16-runtime-read-public-throttle.md)
