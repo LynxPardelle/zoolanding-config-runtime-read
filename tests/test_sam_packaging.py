@@ -1,4 +1,6 @@
 import ast
+import base64
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -8,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +51,80 @@ class SamPackagingTests(unittest.TestCase):
 
         self.assertIn("CodeUri: .build/runtime-read", template)
         self.assertNotIn("CodeUri: .\n", template)
+
+    def test_shared_template_keeps_production_on_the_existing_unaliased_path(self):
+        template = (ROOT / "template.yaml").read_text(encoding="utf-8")
+        function_start = template.index("  ConfigRuntimeReadFunction:")
+        function_end = template.index("\nOutputs:", function_start)
+        function = template[function_start:function_end]
+
+        self.assertNotIn("AutoPublishAlias", function)
+        self.assertNotIn("VersionDeletionPolicy", function)
+        self.assertNotIn("AutoPublishCodeSha256", function)
+        self.assertIn("Transform: AWS::Serverless-2016-10-31", template)
+        self.assertNotIn("AWS::LanguageExtensions", template)
+
+    def test_release_zip_is_reproducible_exact_and_uses_lambda_code_digest(self):
+        module = load_builder_module()
+        package_release = getattr(module, "package_test_release", None)
+
+        self.assertIsNotNone(package_release)
+        if package_release is None:
+            return
+
+        (ROOT / ".build").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / ".build") as directory:
+            temp_root = Path(directory)
+            function_root = temp_root / "ConfigRuntimeReadFunction"
+            function_root.mkdir()
+            for relative_path in reversed(sorted(EXPECTED_RUNTIME_FILES)):
+                shutil.copyfile(ROOT / relative_path, function_root / relative_path)
+
+            built_template = temp_root / "template.yaml"
+            built_template.write_text(
+                "Transform: AWS::Serverless-2016-10-31\n"
+                "Resources:\n"
+                "  ConfigRuntimeReadFunction:\n"
+                "    Type: AWS::Serverless::Function\n"
+                "    Properties:\n"
+                "      CodeUri: ConfigRuntimeReadFunction\n",
+                encoding="utf-8",
+            )
+
+            release_one = temp_root / "release-one"
+            package_release(function_root, built_template, release_one)
+            zip_one = (release_one / "runtime-read.zip").read_bytes()
+
+            for relative_path in EXPECTED_RUNTIME_FILES:
+                os.utime(function_root / relative_path, (1_900_000_000, 1_900_000_000))
+
+            release_two = temp_root / "release-two"
+            package_release(function_root, built_template, release_two)
+            zip_two = (release_two / "runtime-read.zip").read_bytes()
+
+            self.assertEqual(zip_one, zip_two)
+            expected_digest = base64.b64encode(hashlib.sha256(zip_one).digest()).decode("ascii")
+            self.assertEqual(
+                expected_digest,
+                (release_one / "lambda-code-sha256.txt").read_text(encoding="ascii").strip(),
+            )
+            release_template = (release_one / "template.yaml").read_text(encoding="utf-8")
+            self.assertIn("CodeUri: runtime-read.zip", release_template)
+            self.assertIn(
+                "Transform:\n- AWS::LanguageExtensions\n- AWS::Serverless-2016-10-31",
+                release_template,
+            )
+            self.assertIn("      AutoPublishAlias: live", release_template)
+            self.assertIn("      AutoPublishAliasAllProperties: true", release_template)
+            self.assertIn("      VersionDeletionPolicy: Retain", release_template)
+
+            with zipfile.ZipFile(release_one / "runtime-read.zip") as archive:
+                self.assertEqual(sorted(EXPECTED_RUNTIME_FILES), archive.namelist())
+                for info in archive.infolist():
+                    self.assertEqual((1980, 1, 1, 0, 0, 0), info.date_time)
+                    self.assertEqual(zipfile.ZIP_STORED, info.compress_type)
+                    self.assertEqual(0o100644, info.external_attr >> 16)
+                    self.assertEqual((ROOT / info.filename).read_bytes(), archive.read(info.filename))
 
     def test_runtime_allowlist_covers_every_local_python_import(self):
         local_dependencies: set[str] = set()
@@ -195,6 +272,11 @@ class SamPackagingTests(unittest.TestCase):
             )
 
     def test_ci_and_validation_jobs_build_and_verify_the_exact_sam_artifact(self):
+        package_command = (
+            "python tools/build_lambda_artifact.py --package-test-release "
+            ".aws-sam/build/ConfigRuntimeReadFunction "
+            "--sam-template .aws-sam/build/template.yaml"
+        )
         for workflow_name in ("ci.yml", "deploy-test.yml", "deploy-production.yml"):
             with self.subTest(workflow=workflow_name):
                 workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
@@ -214,6 +296,11 @@ class SamPackagingTests(unittest.TestCase):
                 )
                 self.assertLess(build, sam_build)
                 self.assertLess(sam_build, verify)
+                if workflow_name == "deploy-production.yml":
+                    self.assertNotIn(package_command, workflow)
+                else:
+                    package = workflow.index(package_command, verify)
+                    self.assertLess(verify, package)
 
     def test_workflows_restore_exact_revision_after_tests_before_build(self):
         checkout = "uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd"

@@ -84,15 +84,17 @@ jobs:
           sam validate --lint
           sam build --no-cached
           python tools/build_lambda_artifact.py --verify-artifact .aws-sam/build/ConfigRuntimeReadFunction
+          python tools/build_lambda_artifact.py --package-test-release .aws-sam/build/ConfigRuntimeReadFunction --sam-template .aws-sam/build/template.yaml
+          sam validate --lint --template-file .aws-sam/release/template.yaml
 
       - name: Write validated build manifest
         id: artifact_metadata
         shell: bash
         run: |
           set -euo pipefail
-          (cd .aws-sam/build && LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > .aws-sam/build-manifest.sha256
+          (cd .aws-sam/release && LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > .aws-sam/release-manifest.sha256
           artifact_name="runtime-read-test-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}"
-          manifest_digest="$(sha256sum .aws-sam/build-manifest.sha256 | cut -d ' ' -f1)"
+          manifest_digest="$(sha256sum .aws-sam/release-manifest.sha256 | cut -d ' ' -f1)"
           [[ "$artifact_name" =~ ^runtime-read-test-build-[1-9][0-9]*-[1-9][0-9]*-[a-f0-9]{40}$ ]]
           [[ "$manifest_digest" =~ ^[a-f0-9]{64}$ ]]
           printf 'artifact_name=%s\nmanifest_digest=%s\n' "$artifact_name" "$manifest_digest" >> "$GITHUB_OUTPUT"
@@ -103,10 +105,10 @@ jobs:
         with:
           name: ${{ steps.artifact_metadata.outputs.artifact_name }}
           path: |
-            .aws-sam/build/template.yaml
-            .aws-sam/build/ConfigRuntimeReadFunction/lambda_function.py
-            .aws-sam/build/ConfigRuntimeReadFunction/zoolanding_lambda_common.py
-            .aws-sam/build-manifest.sha256
+            .aws-sam/release/template.yaml
+            .aws-sam/release/runtime-read.zip
+            .aws-sam/release/lambda-code-sha256.txt
+            .aws-sam/release-manifest.sha256
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 1
@@ -167,14 +169,21 @@ jobs:
           [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$ARTIFACT_NAME" =~ ^runtime-read-test-build-[1-9][0-9]*-[1-9][0-9]*-[a-f0-9]{40}$ ]]
           [[ "$EXPECTED_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]
-          test -f .aws-sam/build/template.yaml
-          test -f .aws-sam/build-manifest.sha256
-          actual_manifest_digest="$(sha256sum .aws-sam/build-manifest.sha256 | cut -d ' ' -f1)"
+          test -f .aws-sam/release/template.yaml
+          test -f .aws-sam/release/runtime-read.zip
+          test -f .aws-sam/release/lambda-code-sha256.txt
+          test -f .aws-sam/release-manifest.sha256
+          actual_manifest_digest="$(sha256sum .aws-sam/release-manifest.sha256 | cut -d ' ' -f1)"
           test "$actual_manifest_digest" = "$EXPECTED_MANIFEST_DIGEST"
-          (cd .aws-sam/build && sha256sum --check --strict ../build-manifest.sha256)
-          cut -c67- .aws-sam/build-manifest.sha256 | LC_ALL=C sort > "$RUNNER_TEMP/manifest-paths.txt"
-          (cd .aws-sam/build && LC_ALL=C find . -type f -print | LC_ALL=C sort) > "$RUNNER_TEMP/artifact-paths.txt"
+          (cd .aws-sam/release && sha256sum --check --strict ../release-manifest.sha256)
+          cut -c67- .aws-sam/release-manifest.sha256 | LC_ALL=C sort > "$RUNNER_TEMP/manifest-paths.txt"
+          (cd .aws-sam/release && LC_ALL=C find . -type f -print | LC_ALL=C sort) > "$RUNNER_TEMP/artifact-paths.txt"
           diff -u "$RUNNER_TEMP/manifest-paths.txt" "$RUNNER_TEMP/artifact-paths.txt"
+          expected_code_sha256="$(tr -d '\r\n' < .aws-sam/release/lambda-code-sha256.txt)"
+          [[ "$expected_code_sha256" =~ ^[A-Za-z0-9+/]{43}=$ ]]
+          actual_code_sha256="$(openssl dgst -sha256 -binary .aws-sam/release/runtime-read.zip | openssl base64 -A)"
+          test "$actual_code_sha256" = "$expected_code_sha256"
+          test "$(grep -Fc 'CodeUri: runtime-read.zip' .aws-sam/release/template.yaml)" -eq 1
 
       - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
         with:
@@ -263,7 +272,7 @@ jobs:
       - name: Deploy test
         run: |
           sam deploy \
-            --template-file .aws-sam/build/template.yaml \
+            --template-file .aws-sam/release/template.yaml \
             --stack-name zoolanding-config-runtime-read-test \
             --region us-east-1 \
             --resolve-s3 \
@@ -284,3 +293,15 @@ jobs:
               "ContentHubPackagesBucketNameProd=zoolanding-content-hub-pr-contenthubpackagesbucket-ujejm7mr5unu" \
               "RuntimeExecutionBoundaryArn=arn:aws:iam::765932874577:policy/zoolanding-config-runtime-read-test-execution-boundary" \
               "LogLevel=INFO"
+
+      - name: Verify immutable live alias
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_code_sha256="$(tr -d '\r\n' < .aws-sam/release/lambda-code-sha256.txt)"
+          function_name="$(aws cloudformation describe-stacks --stack-name zoolanding-config-runtime-read-test --query "Stacks[0].Outputs[?OutputKey=='FunctionName'].OutputValue | [0]" --output text --no-cli-pager)"
+          [[ -n "$function_name" && "$function_name" != "None" ]]
+          live_version="$(aws lambda get-alias --function-name "$function_name" --name live --query FunctionVersion --output text --no-cli-pager)"
+          [[ "$live_version" =~ ^[1-9][0-9]*$ ]]
+          deployed_code_sha256="$(aws lambda get-function-configuration --function-name "$function_name" --qualifier "$live_version" --query CodeSha256 --output text --no-cli-pager)"
+          test "$deployed_code_sha256" = "$expected_code_sha256"
