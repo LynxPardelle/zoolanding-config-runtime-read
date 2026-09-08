@@ -160,6 +160,25 @@ The projection accepts at most eight faces with bounded ASCII family names, root
 
 ## Content hub runtime metadata
 
+An optional `runtime.contentHubs[].localePolicy: "published-only"` enables a
+per-hub published-localization contract. Without it, the existing fallback
+behavior is unchanged. Any other present value is rejected rather than silently
+falling back. The public config allowlist preserves the option.
+
+In this mode, an article must have its own valid, nonempty localization for the
+requested language, including title, path and publication date. No localized
+text, body, dates or cover fields are borrowed from the selected top-level
+language. The producer must include only published translations in
+`localizations`; private revisions are not eligible. Missing translations are
+omitted from Home/Journal data, and their detail route resolves as missing without
+reading another language's package.
+
+Only the dynamic published article index is authoritative for opted-in hubs.
+Authored static `publicArticles` cannot revive a missing or unpublished
+translation, even if the metadata-table binding is absent. Legacy hubs retain
+their existing static fallback and mixed-hub behavior. This change is a local
+candidate until separately released; no draft opt-in or AWS activation is implied.
+
 When `site-config.json` includes `contentHubs`, the runtime bundle includes a safe projection under `metadata.contentHubs`. The legacy projection is allowlisted to `hubId`, `name`, `defaultLanguage`, and `canonicalDraftDomain`; arbitrary nested authoring fields are not exposed. The returned `siteConfig` independently allowlists the fixed object fields in the public `TDraftSiteConfigPayload`, `TDraftSiteRuntimeConfig`, route, lifecycle, auth, data-source, API-action, and `TContentHubRuntimeConfig` contracts. Deliberately dynamic public maps such as `defaults` and data-source input values remain customizable, but sensitive key and value classes are removed recursively. JSON `null` remains a valid public value and is not confused with a blocked value.
 
 Dynamic Content Hub index hydration accepts at most four hubs per request and performs at most two DynamoDB queries of 200 items each for each article or taxonomy index. The worst case is therefore eight indexes, 16 DynamoDB queries, and 400 records per individual index. Article-package resolution reuses the hydrated public article identity, verifies its current published/public metadata with one exact item read, and consults the exact slug pointer only as a legacy bundle-key fallback; it does not query the article index again. Ordinary non-article routes do not attempt an article-package lookup. Hubs that outgrow this bounded compatibility path require a separately designed precomputed paginated index; Runtime Read does not perform unbounded table reads.

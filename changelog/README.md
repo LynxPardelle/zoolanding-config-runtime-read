@@ -6,6 +6,8 @@ Use [../README.md](../README.md), code, tests, SAM configuration, and workflows 
 
 ## Migrated History
 
+- [Published locale isolation, 2026-09-07 CT](2026-09-07-published-locale-isolation.md)
+- [THN empty-series locale isolation, 2026-09-08 CT](2026-09-08-thn-empty-series-locale.md)
 - [Immutable Runtime Read release artifact and live alias, 2026-08-30 CT](2026-08-30-immutable-runtime-release.md)
 - [Public draft font-face projection, 2026-08-27 CT](2026-08-27-public-draft-font-faces.md)
 - [Fixed-language route resolution, 2026-08-24 CT](2026-08-24-fixed-route-language.md)

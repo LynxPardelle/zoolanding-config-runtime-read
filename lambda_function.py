@@ -424,6 +424,15 @@ def _content_hub_article_localization(item: Dict[str, Any], locale: str) -> Opti
     return None
 
 
+def _content_hub_published_locales_only(hub: Dict[str, Any]) -> bool:
+    """Opt in per hub; omitted policy preserves the legacy projection exactly."""
+    if "localePolicy" not in hub:
+        return False
+    if hub["localePolicy"] != "published-only":
+        raise ValueError("invalid_content_hub_locale_policy")
+    return True
+
+
 def _content_hub_article_content(value: Any) -> Optional[Any]:
     if isinstance(value, str):
         return _safe_content_hub_text(value, 50000)
@@ -638,22 +647,31 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
     if visibility and visibility != "public":
         return None
 
-    item_locale = _safe_content_hub_id(str(item.get("primaryLocale") or locale).lower())
+    published_locales_only = _content_hub_published_locales_only(hub)
     localization = _content_hub_article_localization(item, locale)
-    if item_locale and item_locale != locale and not localization:
-        return None
-    source = {**item, **(localization or {})}
+    if published_locales_only:
+        if not localization:
+            return None
+        item_locale = locale
+        source = localization
+        fallback: Dict[str, Any] = {}
+    else:
+        item_locale = _safe_content_hub_id(str(item.get("primaryLocale") or locale).lower())
+        if item_locale and item_locale != locale and not localization:
+            return None
+        source = {**item, **(localization or {})}
+        fallback = item
 
     article_id = _safe_content_hub_id(item.get("articleId"))
     title = _safe_content_hub_text(source.get("title"), 160)
     path = _safe_content_hub_path(source.get("path"))
-    published_at = _safe_content_hub_timestamp(source.get("publishedAt") or item.get("publishedAt") or item.get("updatedAt"))
+    published_at = _safe_content_hub_timestamp(source.get("publishedAt") or fallback.get("publishedAt") or fallback.get("updatedAt"))
     if not article_id or not title or not path or not published_at:
         return None
 
     category_slug = _content_hub_taxonomy_slug(source.get("category") or source.get("categorySlug"))
     tags = _content_hub_tags(source.get("tags"))
-    robots = str(source.get("robots") or item.get("robots") or "index,follow").strip()
+    robots = str(source.get("robots") or fallback.get("robots") or "index,follow").strip()
     if robots not in {"index,follow", "noindex,follow", "noindex,nofollow"}:
         robots = "index,follow"
 
@@ -667,8 +685,8 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
         "robots": robots,
     }
     description = _safe_content_hub_text(source.get("summary") or source.get("seoDescription"), 320)
-    updated_at = _safe_content_hub_timestamp(source.get("updatedAt") or item.get("updatedAt"))
-    author_label = _safe_content_hub_text(source.get("authorLabel") or item.get("authorLabel"), 120)
+    updated_at = _safe_content_hub_timestamp(source.get("updatedAt") or fallback.get("updatedAt"))
+    author_label = _safe_content_hub_text(source.get("authorLabel") or fallback.get("authorLabel"), 120)
     canonical_path = _safe_content_hub_path(source.get("canonicalPath") or source.get("canonicalUrl"))
     article_content = _content_hub_article_content(source.get("articleContent"))
     image_src = _safe_content_hub_image_src(
@@ -1062,10 +1080,13 @@ def _merge_content_hub_runtime_indexes(
     environment: str,
     metadata_cache: Optional[Dict[tuple[str, str, str], list[Dict[str, Any]]]] = None,
 ) -> Optional[Dict[str, Any]]:
-    if not isinstance(site_config, dict) or not _content_hub_table_name(environment):
+    if not isinstance(site_config, dict):
         return site_config
     hubs = _runtime_content_hubs(site_config)
     if not hubs:
+        return site_config
+    has_metadata_binding = bool(_content_hub_table_name(environment))
+    if not has_metadata_binding and not any("localePolicy" in hub for hub in hubs):
         return site_config
 
     enriched = copy.deepcopy(site_config)
@@ -1073,6 +1094,18 @@ def _merge_content_hub_runtime_indexes(
     enriched_hubs = enriched["runtime"]["contentHubs"]
     for hub in enriched_hubs:
         if not isinstance(hub, dict):
+            continue
+        published_locales_only = _content_hub_published_locales_only(hub)
+        if published_locales_only:
+            # The dynamic index is authoritative, including when its binding
+            # is absent. Static data cannot restore an unpublished language.
+            hub["publicArticles"] = []
+            # Authored series are readable even before their first article,
+            # but only in the explicitly declared locale of this opt-in hub.
+            if isinstance(hub.get("publicTaxonomy"), list):
+                hub["publicTaxonomy"] = [item for item in hub["publicTaxonomy"]
+                    if isinstance(item, dict) and item.get("locale") == _content_hub_locale(hub, lang)]
+        if not has_metadata_binding:
             continue
         hub_id = _safe_content_hub_id(hub.get("hubId"))
         if not hub_id:
@@ -1101,7 +1134,7 @@ def _merge_content_hub_runtime_indexes(
             + normalized_existing_articles,
             ("articleId",),
         )
-        if merged_articles:
+        if merged_articles or published_locales_only:
             hub["publicArticles"] = merged_articles
 
         dynamic_taxonomy = [
@@ -1577,7 +1610,7 @@ def _project_public_runtime(runtime: Any) -> Dict[str, Any]:
             hub,
             (
                 "hubId", "ownerDraftDomain", "source", "routeBasePath", "listPath",
-                "articlePathPattern", "defaultLocale", "locales", "canonicalMode", "runtimeSourceId",
+                "articlePathPattern", "defaultLocale", "locales", "localePolicy", "canonicalMode", "runtimeSourceId",
                 "publicApiBasePath", "analyticsContext", "publicArticles", "publicTaxonomy",
             ),
             base_path=("runtime_content_hub",),
