@@ -1267,6 +1267,29 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["versionId"], "test-v1")
         self.assertFalse(any(key.endswith(".woff2") for key in self.loaded_keys))
 
+    def test_runtime_bundle_preserves_exact_required_auth_origin_without_private_fields(self):
+        site = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site["runtime"] = {
+            "authRemote": {
+                "enabled": True,
+                "authProfileId": "journal-owner",
+                "endpoint": "/auth-v2/runtime-config",
+                "requiredOrigin": "https://admin-test.thehairnarrative.com",
+                "credentials": {"apiKey": "must-not-render"},
+            }
+        }
+
+        response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+        body = parse(response)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["siteConfig"]["runtime"]["authRemote"], {
+            "enabled": True,
+            "authProfileId": "journal-owner",
+            "endpoint": "/auth-v2/runtime-config",
+            "requiredOrigin": "https://admin-test.thehairnarrative.com",
+        })
+
     def test_public_site_config_is_deny_by_default_for_runtime_branches(self):
         projected = self.handler._public_site_config({
             "version": 1,
