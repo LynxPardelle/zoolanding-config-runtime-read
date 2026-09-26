@@ -1579,7 +1579,7 @@ def _project_public_runtime(runtime: Any) -> Dict[str, Any]:
             "enabled", "consentUI", "consentSnoozeSeconds", "events", "categories",
             "quickStats", "googleTag", "track",
         ),
-        "authRemote": ("enabled", "authProfileId", "endpoint"),
+        "authRemote": ("enabled", "authProfileId", "endpoint", "requiredOrigin"),
         "comboCatalog": ("enabled", "endpoint", "authProfileId", "draftDomain"),
     }
     for key, allowed_keys in simple_objects.items():
