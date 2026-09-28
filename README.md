@@ -66,9 +66,15 @@ For SAM, IAM, parameter, or workflow changes, also run `sam validate` when SAM i
 
 Pushes to `dev` run CI only and do not deploy AWS infrastructure. Pushes to `test` and `main` trigger their environment-specific AWS deployment workflows. Use the workflow-guarded promotion path feature branch -> `dev` -> `test` -> `main`, and do not merge or deploy without explicit approval for the target environment. Plain `sam deploy` uses the default production-oriented profile; do not use it for exploratory validation.
 
-Test and production deployment workflows serialize the entire run by environment and Git ref. They do not cancel an in-progress run, because cancellation could interrupt a CloudFormation operation after it has started mutating infrastructure. A validation job without OIDC runs tests, restores a clean checkout of the exact `${{ github.sha }}` with persisted Git credentials disabled, stages `.build/runtime-read` with only `lambda_function.py` and `zoolanding_lambda_common.py`, validates and builds with SAM CLI `1.163.0`, hashes the exact build, and uploads only the built template, those two public runtime files, and their SHA-256 manifest for one day. The privileged job downloads that artifact by the ID emitted by the validation job in the same workflow run, verifies the manifest digest, every file hash, and the exact file set, and does not check out or execute repository code. Immediately before AWS credentials are obtained, an inline pinned-action verifier repeats the full same-repository merged-PR check, including source/base branches and SHAs, parent order, event predecessor, and a final target-tip read. Deployment then uses the verified built template with explicit parameters that match `samconfig.toml` for the target environment.
+Test and production deployment workflows serialize the entire run by environment and Git ref. They do not cancel an in-progress run, because cancellation could interrupt a CloudFormation operation after it has started mutating infrastructure. A validation job without OIDC runs for each environment: it executes tests, restores a clean checkout of the exact `${{ github.sha }}` with persisted Git credentials disabled, stages `.build/runtime-read` with only `lambda_function.py` and `zoolanding_lambda_common.py`, and validates and builds with SAM CLI `1.163.0`. For the authorized TEST migration, validation also creates a deterministic, uncompressed `runtime-read.zip`, a derived release template whose `CodeUri` points to that file, and the base64 Lambda `CodeSha256`; it uploads only those three files and their SHA-256 manifest for one day. The TEST privileged job downloads that artifact by the ID emitted by the validation job in the same workflow run, verifies the manifest digest, every file hash, the exact file set, and the ZIP's Lambda digest, and does not check out or execute repository code. Immediately before AWS credentials are obtained, an inline pinned-action verifier repeats the full same-repository merged-PR check, including source/base branches and SHAs, parent order, event predecessor, and a final target-tip read. TEST deployment then uses the verified release template with explicit parameters that match `samconfig.toml` and verifies that the stable `live` alias resolves to an immutable version with the exact validated `CodeSha256`. The production workflow is intentionally unchanged by this TEST-only rollout and continues using its prior built-artifact path until separately authorized.
+
+The shared source template remains on the existing unaliased SAM transform used by production. Only the TEST artifact packager derives the two-transform template and injects the `live` alias properties; the production workflow neither calls that packager nor consumes its output.
 
 This runtime repository cannot expand IAM permissions. The Zoolanding infrastructure repository owns the retained permissions boundary and CloudFormation execution role; deployment requires both environment-specific ARNs, and the SAM function must attach the supplied boundary. Each workflow compares its configured, non-secret CloudFormation role ARN with the exact ARN for that environment and will fail closed before requesting AWS credentials if it is absent or different.
+
+In TEST, SAM publishes each deployment as an immutable Lambda version behind the stable `live` alias. `AWS::LanguageExtensions` runs before `AWS::Serverless-2016-10-31`, so parameter references are resolved before SAM derives the generated version identity; this prevents a parameter-only environment change from updating `$LATEST` while leaving `live` on an older configuration. `AutoPublishAliasAllProperties` makes version-relevant function changes produce a new version, and `VersionDeletionPolicy: Retain` preserves earlier generated versions. SAM binds both the API Gateway integration and its Lambda permission to `live`; the public `ApiUrl` and base function-name output remain unchanged.
+
+Before promoting this alias-aware template, `zoolandingpage-aws-infra` must first deploy the matching narrowly scoped CloudFormation permissions for Lambda alias and version management in the same target environment. Do not update `live` manually. To roll back, promote an approved revert or prior immutable source revision through the same guarded workflow so CloudFormation moves `live` and the API permission together; retained versions remain available for verification and recovery.
 
 CloudFormation stores `--role-arn` on the stack and uses that associated role for future operations. Omitting `--role-arn` from a later deploy does not detach or roll back that association; the workflows still pass it explicitly so configuration drift is visible. Changing only `AWS_ROLE_ARN`, the GitHub OIDC caller, does not change the stack's retained CloudFormation role. This persistence matches the AWS [`UpdateStack --role-arn` contract](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/update-stack.html).
 
@@ -146,7 +152,32 @@ Routes without `language` continue using request `lang`, then the site default, 
 
 Every present route language must already be canonical, must appear in `site.i18n.supportedLanguages` (string or `{ "code": "..." }` form), and must have a nonempty, trim-stable string `pageId`. Each `(pageId, language)` must be unique within its route source. Runtime Read validates the published site config and any in-snapshot metadata fallback before loading localized payloads and before returning maintenance or suspension fallbacks. Invalid, unsupported, noncanonical, malformed-page, or duplicate published values fail closed through the generic public `500` response without returning route content or private diagnostics.
 
+## Public draft font faces
+
+Runtime Read preserves an optional `site.fonts` collection from the immutable published site config, following the hub's [draft font-face contract at the validated TEST release](https://github.com/LynxPardelle/zoolandingpage/blob/01b6e9f8dbdbb52532502b78d89b170a96e6000c/docs/api-driven-config/23-draft-font-faces.md). It returns only valid `family`, `src`, optional `weight`, and optional `style` descriptors; it never fetches font files or injects descriptor defaults.
+
+The projection accepts at most eight faces with bounded ASCII family names, root-relative or HTTPS WOFF2 sources, and valid, nonoverlapping weight ranges for each case-insensitive family and style. Source URLs cannot contain credentials, ports, queries, fragments, traversal, or encoded syntax. The existing recursive sensitive-value filter still applies. An invalid or sensitive descriptor causes the entire optional collection to be omitted, not truncated or partially published. An absent field remains absent, and an explicitly empty array remains empty. All other public-field, environment, and server-only boundaries are unchanged.
+
 ## Content hub runtime metadata
+
+An optional `runtime.contentHubs[].localePolicy: "published-only"` enables a
+per-hub published-localization contract. Without it, the existing fallback
+behavior is unchanged. Any other present value is rejected rather than silently
+falling back. The public config allowlist preserves the option.
+
+In this mode, an article must have its own valid, nonempty localization for the
+requested language, including title, path and publication date. No localized
+text, body, dates or cover fields are borrowed from the selected top-level
+language. The producer must include only published translations in
+`localizations`; private revisions are not eligible. Missing translations are
+omitted from Home/Journal data, and their detail route resolves as missing without
+reading another language's package.
+
+Only the dynamic published article index is authoritative for opted-in hubs.
+Authored static `publicArticles` cannot revive a missing or unpublished
+translation, even if the metadata-table binding is absent. Legacy hubs retain
+their existing static fallback and mixed-hub behavior. This change is a local
+candidate until separately released; no draft opt-in or AWS activation is implied.
 
 When `site-config.json` includes `contentHubs`, the runtime bundle includes a safe projection under `metadata.contentHubs`. The legacy projection is allowlisted to `hubId`, `name`, `defaultLanguage`, and `canonicalDraftDomain`; arbitrary nested authoring fields are not exposed. The returned `siteConfig` independently allowlists the fixed object fields in the public `TDraftSiteConfigPayload`, `TDraftSiteRuntimeConfig`, route, lifecycle, auth, data-source, API-action, and `TContentHubRuntimeConfig` contracts. Deliberately dynamic public maps such as `defaults` and data-source input values remain customizable, but sensitive key and value classes are removed recursively. JSON `null` remains a valid public value and is not confused with a blocked value.
 
@@ -240,3 +271,110 @@ sites/{domain}/versions/{versionId}/
 ```
 
 Shared domain-level files are optional. When they exist, the Lambda merges them first and then applies page-level overrides.
+
+
+## THN production promotion and reviewed activation
+
+THN source promotion is separate from activation. The repository-scoped production
+selection has exactly `schemaVersion`, `mode`, `sourceSha`, `sourceTree`,
+`targetBaseSha`, and `mergeTree`; mode is `thn-source-only` and schema version is 1.
+The verifier checks the current source branch, both native merge parents, event
+before/after SHA, source tree and native merge tree. An absent, malformed or stale
+production selector fails before credentials. A selected promotion runs mandatory
+validation and omits AWS. Main-only source changes remain in the merged tree.
+
+The TEST selector suppresses AWS only for the exact reviewed THN promotion. With
+no TEST selector, the established automatic TEST merge/provenance path remains.
+A present invalid TEST selector fails. Production never uses that fallback.
+
+Manual activation requires the protected branch and a separate repository-scoped
+selection with exactly `schemaVersion: 1`, `mode: thn-reviewed-activation`, `sha`,
+`tree`, and `workflowSha256` (LF-normalized workflow bytes). This selection only
+binds source and operation; it does not approve AWS changes. `review` retains a
+native change set and reports its ARN and full inventory digest. `execute` must
+consume that same ARN and explicitly approved digest, with a fresh baseline and
+original/processed templates; it does not repackage or create another change set.
+
+A source-only, skipped deploy or review-only successful TEST run is not release
+provenance. Production requires the exact current TEST source and immutable
+artifact from a successful TEST deploy plus its post-deploy verification. No TEST
+account, QA writer mode or article data is copied to production.
+
+`THN Runtime Production Release` is the only manual production activation path;
+legacy production dispatch fails before credentials. It consumes the exact TEST
+`runtime-read.zip` bytes and verifies both members against the selected source.
+It also compares the live TEST alias ZIP before and after activation. Production
+keeps its existing function/API topology; TEST-only version/alias template fields
+are projected away without rebuilding the ZIP. Only production Lambda code can
+change. TEST may update its retained version and `live` alias. IAM, API, storage,
+parameters, environment configuration and replacements are rejected.
+
+The unprivileged job seals an allowlisted transport containing the TEST release
+and the current protected operation helper. The privileged job executes only that
+verified helper, without repository checkout or dependency installation. This is
+an explicit operation-tool artifact trust boundary; it does not change the two
+file Lambda inventory. Review uses a content-addressed S3 ZIP, requires bucket
+versioning and exact account ownership, pins object VersionId and reads back the
+bytes. The native digest includes operation SHA/helper hash and all resource
+changes. Postflight preserves function configuration and non-version identities.
+
+### Identical Runtime TEST packages
+
+The manual TEST operator compares the sealed ZIP with the bytes of the published
+version selected by `live`. It also verifies the alias, its physical version
+resource, all published versions, full `$LATEST` and qualified configuration, and
+runtime management. Only validated identity metadata (`FunctionArn`, `Version`,
+`RevisionId`, `LastModified`) can differ between latest and published configuration.
+Signed download URLs remain in memory; their regional Lambda storage origin,
+HTTPS transport and exact package digest are checked before accepting bytes.
+
+Before any package or preview write, the complete promoted SAM source is compared
+with its previous source except `CodeUri`, including inactive condition branches.
+The official pinned SAM/LanguageExtensions projection uses every actual stack
+parameter and pseudo parameter. It must match the complete native template except
+Code and the redundant generated version/alias reference. No pending macros,
+unexpected resources, metadata, conditions, outputs or parameters are allowed.
+
+If the package and configuration are identical, the candidate clones the actual
+Processed template and replaces only the Lambda `Code` pointer with the verified
+versioned package. Its inventory must contain exactly one non-replacing Function
+Code modification. Every alias/version resource and physical identity is retained;
+no redundant version is published. A different package uses the existing SAM
+version/alias path after the same source/projection checks.
+
+A native Code-only Original template no longer contains SAM source. Subsequent
+manual TEST releases recover it from the immutable Git revision in the canonical
+Code pointer, verify the Git blob and the closed release builder grammar, and
+require a successful protected TEST execution with its immutable-alias postcheck.
+Review-only runs are insufficient. This reference is sealed into the reviewed
+baseline and checked again before mutation. Postflight reads actual AWS state
+without requiring the still-running workflow to have already completed.
+
+Manual TEST projection installs SAM CLI `1.163.0` and translator `1.111.0` in an
+isolated operation runtime before AWS credentials. Its job requires Actions read
+access for previous execution provenance. This changes operation tooling only;
+the Lambda package still contains exactly the same two runtime files. Production
+retains its existing topology and separate reviewed activation path.
+
+AWS `Auto` runtime management may apply a patch even for an identical Code update.
+TEST postflight remains strict: a changed runtime stops promotion for diagnosis.
+The production managed-patch exception is not applied to TEST. The full design is
+in [the identical-package release specification](docs/superpowers/specs/2026-09-28-runtime-identical-package-release.md).
+
+The dedicated THN v2 runtime maps server `ENVIRONMENT_NAME=prod|production` to
+canonical `production` and `test` to `test`. It requires exact journal-owner,
+`/auth-v2/runtime-config` and admin origin for that environment. Browser metadata
+cannot select the deployment profile. Legacy v1 and other registered domains
+retain their existing read-only behavior.
+
+Before activation, compare actual stack parameters, processed templates, Lambda,
+TEST alias/package, versioned objects, OIDC trust, deploy and execution roles,
+permissions boundaries and policies with AWS CLI. Missing identity, permission or
+configuration prerequisites stop activation; local unit shapes do not prove live
+AWS readiness. An empty or unexpected native inventory fails closed for diagnosis.
+
+### Retained production preview authority and expiry
+
+The protected production operation seals fresh live MAIN/TEST source, actual deployment/execution role identity and inline-policy hashes, and the native preview CreationTime. Execute is allowed for24hours from that native timestamp and repeats the authority checks at its mutation boundary. Authority tooling is transported and hashed separately from the unchanged trusted TEST Lambda ZIP. Current production execution-role identity is preserved. Newly attached managed policies or permissions boundaries require review before this closed role profile can activate.
+
+An expired or abandoned preview is cleaned by a separately approved operator. Capture `aws cloudformation describe-change-set --stack-name <exact-owned-production-stack> --change-set-name <reviewed-native-arn> --include-property-values`; compare the exact StackId, ChangeSetId, owned name prefix `thn-runtime-`, CreationTime, reviewed full native inventory and AVAILABLE execution state with the saved review. Then delete that same reviewed ARN using `aws cloudformation delete-change-set --stack-name <exact-owned-production-stack> --change-set-name <reviewed-native-arn>`. Record the approval, inspected inventory and deletion result privately. Production stack/resources retain their identities.

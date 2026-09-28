@@ -97,6 +97,8 @@ Globals:
 Resources:
   RuntimeApi:
     Type: AWS::Serverless::Api
+    Metadata:
+      SamResourceId: RuntimeApi
     Properties:
       StageName: Prod
       MethodSettings:

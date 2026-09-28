@@ -76,6 +76,13 @@ CONTENT_HUB_UNSAFE_VALUE_RE = re.compile(
     r"AWSAccessKeyId=|Signature=|Expires=|ssm:/|secretsmanager:/)",
     re.I,
 )
+PUBLIC_FONT_FAMILY_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[ -][A-Za-z0-9]+)*")
+PUBLIC_FONT_SOURCE_RE = re.compile(
+    r"(?!.*[\x00-\x20\x7f])(?:/(?!/)|https://[A-Za-z0-9.-]+/)"
+    r"(?!\.{1,2}/)(?!.*[/]\.{1,2}/)[A-Za-z0-9._/-]+\.woff2"
+)
+PUBLIC_FONT_WEIGHT_RE = re.compile(r"(?:[1-9][0-9]{0,2}|1000)(?: (?:[1-9][0-9]{0,2}|1000))?")
+PUBLIC_FONT_KEYS = frozenset({"family", "src", "weight", "style"})
 _PUBLIC_VALUE_BLOCKED = object()
 
 
@@ -417,6 +424,15 @@ def _content_hub_article_localization(item: Dict[str, Any], locale: str) -> Opti
     return None
 
 
+def _content_hub_published_locales_only(hub: Dict[str, Any]) -> bool:
+    """Opt in per hub; omitted policy preserves the legacy projection exactly."""
+    if "localePolicy" not in hub:
+        return False
+    if hub["localePolicy"] != "published-only":
+        raise ValueError("invalid_content_hub_locale_policy")
+    return True
+
+
 def _content_hub_article_content(value: Any) -> Optional[Any]:
     if isinstance(value, str):
         return _safe_content_hub_text(value, 50000)
@@ -631,22 +647,31 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
     if visibility and visibility != "public":
         return None
 
-    item_locale = _safe_content_hub_id(str(item.get("primaryLocale") or locale).lower())
+    published_locales_only = _content_hub_published_locales_only(hub)
     localization = _content_hub_article_localization(item, locale)
-    if item_locale and item_locale != locale and not localization:
-        return None
-    source = {**item, **(localization or {})}
+    if published_locales_only:
+        if not localization:
+            return None
+        item_locale = locale
+        source = localization
+        fallback: Dict[str, Any] = {}
+    else:
+        item_locale = _safe_content_hub_id(str(item.get("primaryLocale") or locale).lower())
+        if item_locale and item_locale != locale and not localization:
+            return None
+        source = {**item, **(localization or {})}
+        fallback = item
 
     article_id = _safe_content_hub_id(item.get("articleId"))
     title = _safe_content_hub_text(source.get("title"), 160)
     path = _safe_content_hub_path(source.get("path"))
-    published_at = _safe_content_hub_timestamp(source.get("publishedAt") or item.get("publishedAt") or item.get("updatedAt"))
+    published_at = _safe_content_hub_timestamp(source.get("publishedAt") or fallback.get("publishedAt") or fallback.get("updatedAt"))
     if not article_id or not title or not path or not published_at:
         return None
 
     category_slug = _content_hub_taxonomy_slug(source.get("category") or source.get("categorySlug"))
     tags = _content_hub_tags(source.get("tags"))
-    robots = str(source.get("robots") or item.get("robots") or "index,follow").strip()
+    robots = str(source.get("robots") or fallback.get("robots") or "index,follow").strip()
     if robots not in {"index,follow", "noindex,follow", "noindex,nofollow"}:
         robots = "index,follow"
 
@@ -660,8 +685,8 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
         "robots": robots,
     }
     description = _safe_content_hub_text(source.get("summary") or source.get("seoDescription"), 320)
-    updated_at = _safe_content_hub_timestamp(source.get("updatedAt") or item.get("updatedAt"))
-    author_label = _safe_content_hub_text(source.get("authorLabel") or item.get("authorLabel"), 120)
+    updated_at = _safe_content_hub_timestamp(source.get("updatedAt") or fallback.get("updatedAt"))
+    author_label = _safe_content_hub_text(source.get("authorLabel") or fallback.get("authorLabel"), 120)
     canonical_path = _safe_content_hub_path(source.get("canonicalPath") or source.get("canonicalUrl"))
     article_content = _content_hub_article_content(source.get("articleContent"))
     image_src = _safe_content_hub_image_src(
@@ -1055,10 +1080,13 @@ def _merge_content_hub_runtime_indexes(
     environment: str,
     metadata_cache: Optional[Dict[tuple[str, str, str], list[Dict[str, Any]]]] = None,
 ) -> Optional[Dict[str, Any]]:
-    if not isinstance(site_config, dict) or not _content_hub_table_name(environment):
+    if not isinstance(site_config, dict):
         return site_config
     hubs = _runtime_content_hubs(site_config)
     if not hubs:
+        return site_config
+    has_metadata_binding = bool(_content_hub_table_name(environment))
+    if not has_metadata_binding and not any("localePolicy" in hub for hub in hubs):
         return site_config
 
     enriched = copy.deepcopy(site_config)
@@ -1066,6 +1094,18 @@ def _merge_content_hub_runtime_indexes(
     enriched_hubs = enriched["runtime"]["contentHubs"]
     for hub in enriched_hubs:
         if not isinstance(hub, dict):
+            continue
+        published_locales_only = _content_hub_published_locales_only(hub)
+        if published_locales_only:
+            # The dynamic index is authoritative, including when its binding
+            # is absent. Static data cannot restore an unpublished language.
+            hub["publicArticles"] = []
+            # Authored series are readable even before their first article,
+            # but only in the explicitly declared locale of this opt-in hub.
+            if isinstance(hub.get("publicTaxonomy"), list):
+                hub["publicTaxonomy"] = [item for item in hub["publicTaxonomy"]
+                    if isinstance(item, dict) and item.get("locale") == _content_hub_locale(hub, lang)]
+        if not has_metadata_binding:
             continue
         hub_id = _safe_content_hub_id(hub.get("hubId"))
         if not hub_id:
@@ -1094,7 +1134,7 @@ def _merge_content_hub_runtime_indexes(
             + normalized_existing_articles,
             ("articleId",),
         )
-        if merged_articles:
+        if merged_articles or published_locales_only:
             hub["publicArticles"] = merged_articles
 
         dynamic_taxonomy = [
@@ -1539,7 +1579,7 @@ def _project_public_runtime(runtime: Any) -> Dict[str, Any]:
             "enabled", "consentUI", "consentSnoozeSeconds", "events", "categories",
             "quickStats", "googleTag", "track",
         ),
-        "authRemote": ("enabled", "authProfileId", "endpoint"),
+        "authRemote": ("enabled", "authProfileId", "endpoint", "requiredOrigin"),
         "comboCatalog": ("enabled", "endpoint", "authProfileId", "draftDomain"),
     }
     for key, allowed_keys in simple_objects.items():
@@ -1570,7 +1610,7 @@ def _project_public_runtime(runtime: Any) -> Dict[str, Any]:
             hub,
             (
                 "hubId", "ownerDraftDomain", "source", "routeBasePath", "listPath",
-                "articlePathPattern", "defaultLocale", "locales", "canonicalMode", "runtimeSourceId",
+                "articlePathPattern", "defaultLocale", "locales", "localePolicy", "canonicalMode", "runtimeSourceId",
                 "publicApiBasePath", "analyticsContext", "publicArticles", "publicTaxonomy",
             ),
             base_path=("runtime_content_hub",),
@@ -1599,6 +1639,41 @@ def _project_public_runtime(runtime: Any) -> Dict[str, Any]:
     if api_actions:
         public_runtime["apiActions"] = api_actions
     return public_runtime
+
+
+def _public_font_faces(value: Any) -> Optional[list[Dict[str, str]]]:
+    # Match the shared draft-font contract; never fetch a font from this service.
+    # Reject the complete optional list rather than publishing a partial variant set.
+    if not isinstance(value, list) or len(value) > 8:
+        return None
+    ranges: list[tuple[str, str, int, int]] = []
+    for face in value:
+        if not isinstance(face, dict) or not set(face).issubset(PUBLIC_FONT_KEYS):
+            return None
+        family, source = face.get("family"), face.get("src")
+        weight, style = face.get("weight", "400"), face.get("style", "normal")
+        if not isinstance(family, str) or len(family) > 80 or not PUBLIC_FONT_FAMILY_RE.fullmatch(family):
+            return None
+        if not isinstance(source, str) or len(source) > 2048 or not PUBLIC_FONT_SOURCE_RE.fullmatch(source):
+            return None
+        if style not in ("normal", "italic"):
+            return None
+        if not isinstance(weight, str) or not PUBLIC_FONT_WEIGHT_RE.fullmatch(weight):
+            return None
+        bounds = [int(part) for part in weight.split(" ")]
+        lower, upper = bounds[0], bounds[-1]
+        if lower > upper:
+            return None
+        identity = family.lower()
+        if any(identity == previous_family and style == previous_style
+               and lower <= previous_upper and upper >= previous_lower
+               for previous_family, previous_style, previous_lower, previous_upper in ranges):
+            return None
+        ranges.append((identity, style, lower, upper))
+    # Retain the existing public-value filter without introducing trusted exceptions.
+    # Do not inject defaults: published descriptors must retain their exact shape.
+    public_faces = _public_content_hub_payload(value)
+    return public_faces if public_faces == value else None
 
 
 def _public_site_config(site_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -1641,10 +1716,15 @@ def _public_site_config(site_config: Dict[str, Any]) -> Dict[str, Any]:
             public_config["runtime"] = runtime
 
     if "site" in site_config:
+        raw_site = site_config.get("site")
         site = _project_public_object(
-            site_config.get("site"),
+            raw_site,
             ("appIdentity", "theme", "i18n", "icons", "seo", "searchConsole", "hostOverrides"),
         )
+        if isinstance(raw_site, dict) and "fonts" in raw_site:
+            fonts = _public_font_faces(raw_site["fonts"])
+            if fonts is not None:
+                site["fonts"] = fonts
         if site:
             public_config["site"] = site
 
@@ -2129,6 +2209,21 @@ def _fallback_bundle(domain: str, page_id: str, metadata: Dict[str, Any], lifecy
     }
 
 
+def _validate_thn_protected_runtime(site_config: Dict[str, Any], environment: str) -> None:
+    # Only the dedicated THN v2 profile is closed here; generic/v1 sites retain
+    # their existing read-only projection and registered alias behavior.
+    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
+    auth = runtime.get("authRemote") if isinstance(runtime, dict) else None
+    if site_config.get("domain") != "thehairnarrative.com" or not isinstance(auth, dict) or not (auth.get("authProfileId") == "journal-owner" or str(auth.get("endpoint", "")).startswith("/auth-v2/")):
+        return
+    server_environment = {"test": "test", "prod": "production", "production": "production"}.get(os.getenv("ENVIRONMENT_NAME", ""))
+    origins = {"test": "https://admin-test.thehairnarrative.com", "production": "https://admin.thehairnarrative.com"}
+    if (server_environment is None or environment != server_environment
+        or auth.get("authProfileId") != "journal-owner" or auth.get("enabled") is not True or auth.get("endpoint") != "/auth-v2/runtime-config"
+        or auth.get("requiredOrigin") != origins[server_environment]):
+        raise ValueError("protected_runtime_profile_invalid")
+
+
 def _published_bundle(
     *,
     request_id: str,
@@ -2149,6 +2244,7 @@ def _published_bundle(
     fallback_from_domain: Optional[str] = None,
     article_bundle: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    _validate_thn_protected_runtime(payloads["siteConfig"], environment)
     variables_payload = _merge_content_hub_variables(
         _merge_variables(domain, page_id, payloads["sharedVariables"], payloads["pageVariables"]),
         payloads["siteConfig"],
