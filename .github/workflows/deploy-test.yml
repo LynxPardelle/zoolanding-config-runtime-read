@@ -163,6 +163,7 @@ jobs:
       EXPECTED_AUTHORITY_DIGEST: ${{ needs.validate.outputs.authority_digest }}
     permissions:
       contents: read
+      actions: read
       id-token: write
       pull-requests: read
     steps:
@@ -240,6 +241,16 @@ jobs:
         run: |
           set -euo pipefail
           test "$AWS_CLOUDFORMATION_ROLE_ARN" = "arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-test-cfn-exec"
+
+      - name: Prepare pinned native projection runtime
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          native_python="$RUNNER_TEMP/thn-runtime-native-venv/bin/python"
+          python3 -m venv "$RUNNER_TEMP/thn-runtime-native-venv"
+          "$native_python" -m pip install --disable-pip-version-check aws-sam-cli==1.163.0 aws-sam-translator==1.111.0
+          printf 'NATIVE_RELEASE_PYTHON=%s\n' "$native_python" >> "$GITHUB_ENV"
 
       - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
@@ -329,6 +340,7 @@ jobs:
       - name: Deploy test
         env:
           SEALED_MANIFEST_DIGEST: ${{ steps.validate_artifact_metadata.outputs.manifest_digest }}
+          GH_TOKEN: ${{ github.event_name == 'workflow_dispatch' && github.token || '' }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
@@ -355,7 +367,7 @@ jobs:
               "RuntimeExecutionBoundaryArn=arn:aws:iam::765932874577:policy/zoolanding-config-runtime-read-test-execution-boundary" \
               "LogLevel=INFO"
           else
-            python3 .aws-sam/native-runtime-release.py --environment=test --execution="$EXECUTION" --release-root=.aws-sam/release --manifest-digest="$SEALED_MANIFEST_DIGEST" --source-sha="$GITHUB_SHA" --review-digest="$REVIEW_DIGEST" --review-change-set-arn="$REVIEW_CHANGE_SET_ARN"
+            "$NATIVE_RELEASE_PYTHON" .aws-sam/native-runtime-release.py --environment=test --execution="$EXECUTION" --release-root=.aws-sam/release --manifest-digest="$SEALED_MANIFEST_DIGEST" --source-sha="$GITHUB_SHA" --review-digest="$REVIEW_DIGEST" --review-change-set-arn="$REVIEW_CHANGE_SET_ARN"
           fi
 
       - name: Verify immutable live alias
