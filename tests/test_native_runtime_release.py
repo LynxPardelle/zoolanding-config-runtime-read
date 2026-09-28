@@ -107,3 +107,114 @@ class NativeReleaseReviewTests(unittest.TestCase):
             if part=="environment":changed["functions"][0]["Environment"]["Variables"]["ENVIRONMENT_NAME"]="test"
             if part=="parameters":changed["parameters"]=[{"ParameterKey":"unexpected","ParameterValue":"new"}]
             with self.subTest(part=part),self.assertRaises(ValueError):check(before,changed,"production","new")
+
+
+class ManagedProductionRuntimeTests(unittest.TestCase):
+    def operator(self):
+        spec=importlib.util.spec_from_file_location("managed_runtime_operator",ROOT/"tools/native_runtime_release.py")
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module
+
+    def snapshots(self,mode="Auto"):
+        function={"FunctionName":"existing","FunctionArn":"arn:aws:lambda:us-east-1:765932874577:function:existing",
+                  "Runtime":"python3.13","PackageType":"Zip","Architectures":["x86_64"],"Role":"existing-role",
+                  "Environment":{"Variables":{"ENVIRONMENT_NAME":"prod"}},"Handler":"lambda_function.lambda_handler",
+                  "RuntimeVersionConfig":{"RuntimeVersionArn":"arn:aws:lambda:us-east-1::runtime:"+"1"*64},"CodeSha256":"old"}
+        before={"stackId":"same-stack","parameters":[],"outputs":[],"identities":[],"functions":[function],
+                "runtimeManagement":{"UpdateRuntimeOn":mode}}
+        after=copy.deepcopy(before);after["functions"][0]["CodeSha256"]="new"
+        after["functions"][0]["RuntimeVersionConfig"]["RuntimeVersionArn"]="arn:aws:lambda:us-east-1::runtime:"+"2"*64
+        return before,after
+
+    def test_production_managed_patch_postflight_accepts_only_verified_automatic_modes(self):
+        op=self.operator()
+        for mode in ("Auto","FunctionUpdate"):
+            before,after=self.snapshots(mode)
+            with self.subTest(mode=mode):op.verify_preserved_state(before,after,"production","new")
+        for mode in ("Manual",None,"unknown"):
+            before,after=self.snapshots(mode)
+            with self.subTest(mode=mode),self.assertRaises(ValueError):op.verify_preserved_state(before,after,"production","new")
+        before,after=self.snapshots();after["runtimeManagement"]["UpdateRuntimeOn"]="FunctionUpdate"
+        with self.assertRaises(ValueError):op.verify_preserved_state(before,after,"production","new")
+        before,after=self.snapshots()
+        for value in ({},None,{"UpdateRuntimeOn":"Auto","Unknown":"unexpected"}):
+            changed=copy.deepcopy(after);changed["runtimeManagement"]=value
+            with self.subTest(value=value),self.assertRaises(ValueError):op.verify_preserved_state(before,changed,"production","new")
+
+    def test_production_patch_exception_rejects_other_configuration_and_invalid_metadata(self):
+        op=self.operator();before,after=self.snapshots()
+        for key,value in (("Runtime","python3.14"),("Architectures",["arm64"]),("PackageType","Image"),
+                          ("Role","changed"),("Environment",{"Variables":{"ENVIRONMENT_NAME":"test"}}),
+                          ("Handler","changed.handler"),("Unknown",True),
+                          ("RuntimeVersionConfig",{}),("RuntimeVersionConfig",None),
+                          ("RuntimeVersionConfig",{"RuntimeVersionArn":"arn:aws:lambda:us-west-2::runtime:"+"2"*64}),
+                          ("RuntimeVersionConfig",{"RuntimeVersionArn":"arn:aws:lambda:us-east-1::runtime:"+"2"*64,"Error":{"ErrorCode":"InvalidRuntime"}})):
+            changed=copy.deepcopy(after);changed["functions"][0][key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(ValueError):op.verify_preserved_state(before,changed,"production","new")
+        with self.assertRaises(ValueError):op.verify_preserved_state(before,after,"test","new")
+
+    def test_runtime_management_reads_exact_function_and_matches_native_template(self):
+        from unittest.mock import patch
+        op=self.operator();before,_=self.snapshots();function=before["functions"][0]
+        template={"Resources":{"ConfigRuntimeReadFunction":{"Properties":{}}}}
+        read=getattr(op,"runtime_management",None)
+        self.assertTrue(callable(read),"production baseline has no verified runtime management mode")
+        for mode in ("Auto","FunctionUpdate","Manual"):
+            current=copy.deepcopy(template);setting={"UpdateRuntimeOn":mode}
+            if mode=="Manual":setting["RuntimeVersionArn"]=function["RuntimeVersionConfig"]["RuntimeVersionArn"]
+            if mode!="Auto":current["Resources"]["ConfigRuntimeReadFunction"]["Properties"]["RuntimeManagementConfig"]=setting
+            response={"FunctionArn":function["FunctionArn"],"UpdateRuntimeOn":mode,
+                      "RuntimeVersionArn":setting.get("RuntimeVersionArn")}
+            with patch.object(op,"aws",return_value=response) as call:
+                self.assertEqual(read(function,current),setting)
+                call.assert_called_once_with("lambda","get-runtime-management-config","--function-name",function["FunctionName"])
+        valid={"FunctionArn":function["FunctionArn"],"UpdateRuntimeOn":"Auto","RuntimeVersionArn":None}
+        for mutation in ({"FunctionArn":function["FunctionArn"]+":1"},{"UpdateRuntimeOn":"Manual"},
+                         {"UpdateRuntimeOn":"unexpected"},{"RuntimeVersionArn":"unexpected"},{"Unexpected":"extra"}):
+            with patch.object(op,"aws",return_value={**valid,**mutation}),self.subTest(mutation=mutation),self.assertRaises(ValueError):read(function,template)
+        for missing in ("FunctionArn","UpdateRuntimeOn"):
+            response=copy.deepcopy(valid);response.pop(missing)
+            with patch.object(op,"aws",return_value=response),self.assertRaises(ValueError):read(function,template)
+        with patch.object(op,"aws",side_effect=ValueError("read unavailable")),self.assertRaises(ValueError):read(function,template)
+
+    def test_digest_keeps_exact_patch_and_mode_before_execution(self):
+        from unittest.mock import patch
+        op=self.operator();before,after=self.snapshots()
+        description={"CreationTime":datetime.datetime.now(datetime.timezone.utc).isoformat(),"ChangeSetId":"retained-arn","StackId":"stack-arn","Parameters":[],"Changes":[]}
+        with patch.dict("os.environ",{"GITHUB_SHA":"d"*40},clear=True):
+            digest=lambda snapshot:op.preview_digest(snapshot,description,{}, {},"a"*40,"b"*64,"c"*64)
+            initial=digest(before)
+            modified=copy.deepcopy(before);modified["functions"][0]["RuntimeVersionConfig"]=after["functions"][0]["RuntimeVersionConfig"]
+            self.assertNotEqual(initial,digest(modified))
+            modified=copy.deepcopy(before);modified["runtimeManagement"]["UpdateRuntimeOn"]="FunctionUpdate"
+            self.assertNotEqual(initial,digest(modified))
+
+
+    def test_baseline_seals_management_and_raw_patch_only_in_production(self):
+        from unittest.mock import patch
+        op=self.operator();before,_=self.snapshots();function=before["functions"][0]
+        template={"Resources":{"ConfigRuntimeReadFunction":{"Properties":{}}}}
+        for environment in ("test","production"):
+            profile=op.PROFILES[environment]
+            def read(*args):
+                if args[:2]==("sts","get-caller-identity"):return {"Account":"765932874577"}
+                if args[:2]==("cloudformation","describe-stacks"):
+                    return {"Stacks":[{"StackId":"same-stack","StackStatus":"UPDATE_COMPLETE","RoleARN":"arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-production-cfn-exec"}]}
+                if args[:2]==("cloudformation","list-stack-resources"):
+                    return {"StackResourceSummaries":[{"LogicalResourceId":"ConfigRuntimeReadFunction","PhysicalResourceId":"existing","ResourceType":"AWS::Lambda::Function"}]}
+                if args[:2]==("lambda","get-function-configuration"):return copy.deepcopy(function)
+                if args[:2]==("cloudformation","get-template"):return {"TemplateBody":copy.deepcopy(template)}
+                if args[:2]==("lambda","get-runtime-management-config"):
+                    return {"FunctionArn":function["FunctionArn"],"UpdateRuntimeOn":"Auto","RuntimeVersionArn":None}
+                raise AssertionError("unexpected read")
+            with patch.dict("os.environ",{"AWS_REGION":"us-east-1"}),patch.object(op,"aws",side_effect=read) as calls, \
+                 patch.object(op,"source_authority",return_value={}),patch.object(op,"permission_authority",return_value={}):
+                snapshot=op.baseline(profile)
+            self.assertEqual(snapshot["functions"][0]["RuntimeVersionConfig"],function["RuntimeVersionConfig"])
+            management=[call for call in calls.call_args_list if call.args[:2]==("lambda","get-runtime-management-config")]
+            if environment=="production":
+                self.assertEqual(snapshot["runtimeManagement"],{"UpdateRuntimeOn":"Auto"})
+                self.assertEqual(len(management),1)
+            else:
+                self.assertNotIn("runtimeManagement",snapshot)
+                self.assertEqual(management,[])
