@@ -318,6 +318,49 @@ versioning and exact account ownership, pins object VersionId and reads back the
 bytes. The native digest includes operation SHA/helper hash and all resource
 changes. Postflight preserves function configuration and non-version identities.
 
+### Identical Runtime TEST packages
+
+The manual TEST operator compares the sealed ZIP with the bytes of the published
+version selected by `live`. It also verifies the alias, its physical version
+resource, all published versions, full `$LATEST` and qualified configuration, and
+runtime management. Only validated identity metadata (`FunctionArn`, `Version`,
+`RevisionId`, `LastModified`) can differ between latest and published configuration.
+Signed download URLs remain in memory; their regional Lambda storage origin,
+HTTPS transport and exact package digest are checked before accepting bytes.
+
+Before any package or preview write, the complete promoted SAM source is compared
+with its previous source except `CodeUri`, including inactive condition branches.
+The official pinned SAM/LanguageExtensions projection uses every actual stack
+parameter and pseudo parameter. It must match the complete native template except
+Code and the redundant generated version/alias reference. No pending macros,
+unexpected resources, metadata, conditions, outputs or parameters are allowed.
+
+If the package and configuration are identical, the candidate clones the actual
+Processed template and replaces only the Lambda `Code` pointer with the verified
+versioned package. Its inventory must contain exactly one non-replacing Function
+Code modification. Every alias/version resource and physical identity is retained;
+no redundant version is published. A different package uses the existing SAM
+version/alias path after the same source/projection checks.
+
+A native Code-only Original template no longer contains SAM source. Subsequent
+manual TEST releases recover it from the immutable Git revision in the canonical
+Code pointer, verify the Git blob and the closed release builder grammar, and
+require a successful protected TEST execution with its immutable-alias postcheck.
+Review-only runs are insufficient. This reference is sealed into the reviewed
+baseline and checked again before mutation. Postflight reads actual AWS state
+without requiring the still-running workflow to have already completed.
+
+Manual TEST projection installs SAM CLI `1.163.0` and translator `1.111.0` in an
+isolated operation runtime before AWS credentials. Its job requires Actions read
+access for previous execution provenance. This changes operation tooling only;
+the Lambda package still contains exactly the same two runtime files. Production
+retains its existing topology and separate reviewed activation path.
+
+AWS `Auto` runtime management may apply a patch even for an identical Code update.
+TEST postflight remains strict: a changed runtime stops promotion for diagnosis.
+The production managed-patch exception is not applied to TEST. The full design is
+in [the identical-package release specification](docs/superpowers/specs/2026-09-28-runtime-identical-package-release.md).
+
 The dedicated THN v2 runtime maps server `ENVIRONMENT_NAME=prod|production` to
 canonical `production` and `test` to `test`. It requires exact journal-owner,
 `/auth-v2/runtime-config` and admin origin for that environment. Browser metadata

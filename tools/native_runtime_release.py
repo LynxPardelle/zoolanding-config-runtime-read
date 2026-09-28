@@ -3,6 +3,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -29,9 +30,273 @@ def _template(value):
     return value
 
 
-def review_resources(before,candidate,changes,environment,source_sha,zip_digest):
+def native_template(value):
+    value = _template(value)
+    if "Transform" in value or "Globals" in value: _reject()
+    def visit(node):
+        if isinstance(node, dict):
+            if "Fn::Transform" in node: _reject()
+            for child in node.values(): visit(child)
+        elif isinstance(node, list):
+            for child in node: visit(child)
+    visit(value)
+    if any(not isinstance(resource, dict) or not isinstance(resource.get("Type"), str)
+           or resource["Type"].startswith("AWS::Serverless::") for resource in value["Resources"].values()): _reject()
+    return value
+
+
+def sam_libraries():
+    if (importlib.metadata.version("aws-sam-cli") != "1.163.0"
+        or importlib.metadata.version("aws-sam-translator") != "1.111.0"): _reject()
+    from samcli.yamlhelper import yaml_parse
+    from samcli.lib.cfn_language_extensions.sam_integration import expand_language_extensions
+    from samtranslator.parser.parser import Parser
+    from samtranslator.translator.translator import Translator
+    from samtranslator.utils.py27hash_fix import to_py27_compatible_template, undo_mark_unicode_str_in_template
+    from samcli.lib.cfn_language_extensions.api import process_template
+    from samcli.lib.cfn_language_extensions.models import PseudoParameterValues
+    from boto3 import Session
+    def translate(fragment, values):
+        fragment, values = copy.deepcopy(fragment), copy.deepcopy(values)
+        # The official transform entry point includes these compatibility steps.
+        # Omitting them changes generated API IDs and tag order under Python 3.
+        to_py27_compatible_template(fragment, values)
+        translator = Translator(managed_policy_map={}, sam_parser=Parser(), plugins=[], boto_session=Session(region_name="us-east-1"))
+        result = translator.translate(fragment, values, get_managed_policy_map=lambda: {}, passthrough_metadata=False)
+        return undo_mark_unicode_str_in_template(result)
+    class SemanticResolver:
+        def __init__(self, values):
+            self.values = copy.deepcopy(values)
+        def resolve_parameter_refs(self, template):
+            pseudos = PseudoParameterValues(region=self.values["AWS::Region"], account_id=self.values["AWS::AccountId"],
+                stack_name=self.values["AWS::StackName"], stack_id=self.values["AWS::StackId"],
+                partition=self.values["AWS::Partition"], url_suffix=self.values["AWS::URLSuffix"])
+            return process_template(copy.deepcopy(template), self.values, pseudos)
+    return yaml_parse, expand_language_extensions, translate, None, None, SemanticResolver
+
+
+def verify_sam_source(candidate_text, original):
+    parse = sam_libraries()[0]
+    candidate = parse(candidate_text)
+    prior = parse(original) if isinstance(original, str) else copy.deepcopy(original)
+    for template in (prior, candidate):
+        if template.get("Transform") != ["AWS::LanguageExtensions", "AWS::Serverless-2016-10-31"]: _reject()
+        template["Resources"]["ConfigRuntimeReadFunction"]["Properties"].pop("CodeUri")
+    if _canonical(prior) != _canonical(candidate): _reject()
+
+
+def _github_read(path):
+    result = subprocess.run(["gh", "api", "repos/LynxPardelle/zoolanding-config-runtime-read/" + path],
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode: _reject()
+    return json.loads(result.stdout)
+
+
+def previous_test_execution(source):
+    """A Code pointer is insufficient without its successful protected execution."""
+    if not re.fullmatch(r"[a-f0-9]{40}", str(source)): _reject()
+    response = _github_read(f"actions/workflows/deploy-test.yml/runs?head_sha={source}&event=workflow_dispatch&status=success&per_page=100")
+    runs = response.get("workflow_runs")
+    if (not isinstance(runs, list) or type(response.get("total_count")) is not int
+        or response["total_count"] != len(runs) or len(runs) > 10
+        or any(not isinstance(run, dict) or type(run.get("id")) is not int or run["id"] < 1 for run in runs)
+        or len({run["id"] for run in runs}) != len(runs)): _reject()
+    for run in sorted(runs, key=lambda item: item["id"], reverse=True):
+        if (run.get("head_sha") != source or run.get("head_branch") != "test" or run.get("event") != "workflow_dispatch"
+            or run.get("status") != "completed" or run.get("conclusion") != "success"
+            or run.get("path") != ".github/workflows/deploy-test.yml"
+            or run.get("repository", {}).get("full_name") != "LynxPardelle/zoolanding-config-runtime-read"
+            or type(run.get("run_attempt")) is not int or run["run_attempt"] < 1): _reject()
+        result = _github_read(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
+        jobs = result.get("jobs")
+        if (not isinstance(jobs, list) or type(result.get("total_count")) is not int
+            or result["total_count"] != len(jobs) or any(not isinstance(job, dict) for job in jobs)): _reject()
+        deploys = [job for job in jobs if job.get("name") == "deploy"]
+        if len(deploys) != 1: _reject()
+        job = deploys[0]
+        if (job.get("run_id") != run["id"] or job.get("head_sha") != source
+            or job.get("status") != "completed" or not isinstance(job.get("steps"), list)): _reject()
+        if job.get("conclusion") != "success": continue
+        steps = job["steps"]
+        if any(not isinstance(step, dict) for step in steps): _reject()
+        required = [ [step for step in steps if step.get("name") == name]
+                     for name in ("Deploy test", "Verify immutable live alias")]
+        if any(len(matches) != 1 for matches in required): _reject()
+        if all(matches[0].get("status") == "completed" and matches[0].get("conclusion") == "success" for matches in required):
+            return {"runId": run["id"], "runAttempt": run["run_attempt"], "headSha": source}
+    _reject()
+
+
+def sam_source_reference(snapshot, candidate_text):
+    parse = sam_libraries()[0]
+    original = parse(snapshot["original"]) if isinstance(snapshot["original"], str) else copy.deepcopy(snapshot["original"])
+    if "Transform" in original:
+        verify_sam_source(candidate_text, original)
+        return {"kind": "cloudformation-original", "samSha256": hashlib.sha256(_canonical(original)).hexdigest()}
+    # A native Code-only template has no remaining SAM source. Recover the exact
+    # closed build grammar from the immutable Git revision named by its package.
+    if os.getenv("GITHUB_REPOSITORY") != "LynxPardelle/zoolanding-config-runtime-read": _reject()
+    code = native_template(snapshot["processed"])["Resources"]["ConfigRuntimeReadFunction"]["Properties"]["Code"]
+    match = re.fullmatch(r"system/thn-runtime/releases/([a-f0-9]{40})/([a-f0-9]{64})\.zip", str(code.get("S3Key", "")))
+    if (not match or code.get("S3Bucket") != PROFILES["test"]["bucket"] or not code.get("S3ObjectVersion")
+        or code["S3ObjectVersion"] == "null" or match[2] != snapshot["testReleaseBinding"]["qualifiedZipSha256"]): _reject()
+    source = match[1]
+    response = _github_read(f"contents/template.yaml?ref={source}")
+    if (response.get("type") != "file" or response.get("path") != "template.yaml" or response.get("encoding") != "base64"
+        or not isinstance(response.get("size"), int) or not 0 < response["size"] <= 65536): _reject()
+    raw = base64.b64decode("".join(response["content"].split()), validate=True)
+    blob_sha = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
+    if len(raw) != response["size"] or blob_sha != response.get("sha"): _reject()
+    template = parse(raw.decode("utf-8"))
+    function = template["Resources"]["ConfigRuntimeReadFunction"]
+    if (template.get("Transform") != "AWS::Serverless-2016-10-31"
+        or set(template["Resources"]) != {"RuntimeApi", "ConfigRuntimeReadFunction"}
+        or function.get("Type") != "AWS::Serverless::Function" or "Metadata" in function
+        or function["Properties"].get("CodeUri") != ".build/runtime-read"
+        or any(key in function["Properties"] for key in ("AutoPublishAlias", "AutoPublishAliasAllProperties", "VersionDeletionPolicy"))
+        or template["Resources"]["RuntimeApi"].get("Type") != "AWS::Serverless::Api"
+        or template["Resources"]["RuntimeApi"].get("Metadata") != {"SamResourceId": "RuntimeApi"}): _reject()
+    template["Transform"] = ["AWS::LanguageExtensions", "AWS::Serverless-2016-10-31"]
+    function["Metadata"] = {"SamResourceId": "ConfigRuntimeReadFunction"}
+    function["Properties"].update(CodeUri="runtime-read.zip", AutoPublishAlias="live", AutoPublishAliasAllProperties=True, VersionDeletionPolicy="Retain")
+    verify_sam_source(candidate_text, template)
+    execution = previous_test_execution(source)
+    return {"kind": "previous-protected-git-sam", "sourceSha": source, "gitBlobSha": blob_sha,
+            "rawSha256": hashlib.sha256(raw).hexdigest(), "samSha256": hashlib.sha256(_canonical(template)).hexdigest(),
+            "execution": execution}
+
+
+def project_test_template(text, snapshot, code):
+    parse, expand, translate, _, _, _ = sam_libraries()
+    template = parse(text)
+    if template.get("Transform") != ["AWS::LanguageExtensions", "AWS::Serverless-2016-10-31"]: _reject()
+    def reject_external_macro(node):
+        if isinstance(node, dict):
+            if "Fn::Transform" in node: _reject()
+            for child in node.values(): reject_external_macro(child)
+        elif isinstance(node, list):
+            for child in node: reject_external_macro(child)
+    reject_external_macro(template)
+    actual = snapshot["parameters"]
+    params = {item["ParameterKey"]: item["ParameterValue"] for item in actual}
+    if len(params) != len(actual) or set(params) != set(template.get("Parameters", {})): _reject()
+    if not all(isinstance(value, str) for value in params.values()): _reject()
+    stack = snapshot["stackId"]
+    if not re.fullmatch(r"arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-config-runtime-read-test/[a-zA-Z0-9-]+", stack): _reject()
+    params.update({"AWS::Region": "us-east-1", "AWS::AccountId": "765932874577", "AWS::Partition": "aws",
+                   "AWS::URLSuffix": "amazonaws.com", "AWS::StackName": PROFILES["test"]["stack"], "AWS::StackId": stack})
+    function = template["Resources"]["ConfigRuntimeReadFunction"]
+    if function.get("Type") != "AWS::Serverless::Function" or function["Properties"].get("CodeUri") != "runtime-read.zip": _reject()
+    function["Properties"]["CodeUri"] = {"Bucket": code["S3Bucket"], "Key": code["S3Key"], "Version": code["S3ObjectVersion"]}
+    expanded = expand(copy.deepcopy(template), parameter_values=copy.deepcopy(params), enabled=True)
+    projected = translate(expanded.expanded_template, copy.deepcopy(params))
+    return native_template(projected), params
+
+
+def code_pointer_candidate(before, projected, parameter_values=None):
+    """Require the full promoted projection; preserve the original native topology."""
+    before = native_template(before)
+    projected = copy.deepcopy(native_template(projected))
+    function = "ConfigRuntimeReadFunction"
+    alias = function + "Aliaslive"
+    prior_alias = before["Resources"][alias]
+    next_alias = projected["Resources"][alias]
+    def version_id(resource):
+        reference = resource["Properties"].get("FunctionVersion")
+        if (not isinstance(reference, dict) or set(reference) != {"Fn::GetAtt"}
+            or not isinstance(reference["Fn::GetAtt"], list) or len(reference["Fn::GetAtt"]) != 2
+            or reference["Fn::GetAtt"][1] != "Version"): _reject()
+        return reference["Fn::GetAtt"][0]
+    old_version, new_version = version_id(prior_alias), version_id(next_alias)
+    for template, logical in ((before, old_version), (projected, new_version)):
+        resource = template["Resources"].get(logical)
+        if (not re.fullmatch(r"ConfigRuntimeReadFunctionVersion[a-zA-Z0-9]+", str(logical))
+            or not isinstance(resource, dict) or resource.get("Type") != "AWS::Lambda::Version"
+            or resource.get("DeletionPolicy") != "Retain"
+            or resource.get("Properties") != {"FunctionName": {"Ref": function}}): _reject()
+    if before["Resources"][old_version] != projected["Resources"][new_version]: _reject()
+    if new_version != old_version:
+        if old_version in projected["Resources"] or new_version in before["Resources"]: _reject()
+        projected["Resources"][old_version] = projected["Resources"].pop(new_version)
+        next_alias["Properties"]["FunctionVersion"] = copy.deepcopy(prior_alias["Properties"]["FunctionVersion"])
+    code = projected["Resources"][function]["Properties"].pop("Code")
+    comparable = copy.deepcopy(before)
+    comparable["Resources"][function]["Properties"].pop("Code")
+    if parameter_values is None:
+        if projected != comparable: _reject()
+    else:
+        resolver = sam_libraries()[-1](parameter_values)
+        if resolver.resolve_parameter_refs(copy.deepcopy(projected)) != resolver.resolve_parameter_refs(copy.deepcopy(comparable)): _reject()
+    candidate = copy.deepcopy(before)
+    candidate["Resources"][function]["Properties"]["Code"] = code
+    return candidate
+
+
+def test_release_binding(snapshot, package):
+    """Seal the actual qualified bytes and every published version, never its URL."""
+    if len(snapshot["functions"]) != 1: _reject()
+    latest = snapshot["functions"][0]
+    function = latest.get("FunctionName")
+    arn = latest.get("FunctionArn")
+    if (not isinstance(function, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", function)
+        or arn != f"arn:aws:lambda:us-east-1:765932874577:function:{function}"
+        or latest.get("Version") != "$LATEST" or latest.get("State") != "Active"
+        or latest.get("LastUpdateStatus") != "Successful"): _reject()
+    alias = aws("lambda", "get-alias", "--function-name", function, "--name", "live")
+    version = alias.get("FunctionVersion")
+    if (not re.fullmatch(r"[1-9][0-9]*", str(version)) or alias.get("Name") != "live"
+        or alias.get("AliasArn") != arn + ":live" or not alias.get("RevisionId")
+        or alias.get("RoutingConfig", {}) not in ({}, {"AdditionalVersionWeights": {}})): _reject()
+    resources = native_template(snapshot["processed"])["Resources"]
+    reference = resources["ConfigRuntimeReadFunctionAliaslive"]["Properties"]
+    if reference.get("Name") != "live" or reference.get("FunctionName") != {"Ref": "ConfigRuntimeReadFunction"}: _reject()
+    version_ref = reference.get("FunctionVersion", {}).get("Fn::GetAtt")
+    if not isinstance(version_ref, list) or len(version_ref) != 2 or version_ref[1] != "Version": _reject()
+    identities = {item["LogicalResourceId"]: item for item in snapshot["identities"]}
+    if (identities.get("ConfigRuntimeReadFunction", {}).get("PhysicalResourceId") != function
+        or identities.get("ConfigRuntimeReadFunctionAliaslive", {}).get("PhysicalResourceId") != arn + ":live"
+        or identities.get(version_ref[0], {}).get("PhysicalResourceId") != arn + ":" + version): _reject()
+    result = aws("lambda", "get-function", "--function-name", function, "--qualifier", version)
+    qualified = result["Configuration"]
+    if qualified.get("FunctionArn") != arn + ":" + version or qualified.get("Version") != version: _reject()
+    identity_fields = {"FunctionArn", "RevisionId", "Version", "LastModified"}
+    if {k:v for k,v in latest.items() if k not in identity_fields} != {k:v for k,v in qualified.items() if k not in identity_fields}: _reject()
+    location = result["Code"]["Location"]
+    lambda_task_url(location)
+    with urlopen(location, timeout=20) as response:
+        content = response.read(10 * 1024 * 1024 + 1)
+    digest = hashlib.sha256(content).digest()
+    if base64.b64encode(digest).decode() != qualified.get("CodeSha256"): _reject()
+    versions = aws("lambda", "list-versions-by-function", "--function-name", function)
+    if set(versions) - {"Versions", "NextMarker", "ResponseMetadata"} or versions.get("NextMarker"): _reject()
+    published = sorted([item for item in versions["Versions"] if item.get("Version") != "$LATEST"], key=lambda item: item["Version"])
+    if len({item["Version"] for item in published}) != len(published): _reject()
+    if any(not re.fullmatch(r"[1-9][0-9]*", str(item.get("Version")))
+           or item.get("FunctionArn") != arn + ":" + item["Version"] for item in published): _reject()
+    matches = [item for item in published if item["Version"] == version]
+    if len(matches) != 1 or matches[0].get("CodeSha256") != qualified["CodeSha256"]: _reject()
+    return {"alias": alias, "qualifiedConfiguration": qualified, "publishedVersions": published,
+            "qualifiedZipSha256": digest.hex(), "identicalPackage": content == package}
+
+
+def verify_neutral_state(before, after, code):
+    if (before.get("testReleaseBinding", {}).get("identicalPackage") is not True
+        or before["testReleaseBinding"] != after.get("testReleaseBinding")
+        or before["identities"] != after["identities"]
+        or before.get("runtimeManagement") != after.get("runtimeManagement")): _reject()
+    expected = copy.deepcopy(native_template(before["processed"]))
+    expected["Resources"]["ConfigRuntimeReadFunction"]["Properties"]["Code"] = code
+    if expected != native_template(after["processed"]): _reject()
+
+
+def review_resources(before,candidate,changes,environment,source_sha,zip_digest,*,identical_package=False):
     if environment not in PROFILES or not re.fullmatch(r"[a-f0-9]{40}",source_sha) or not re.fullmatch(r"[a-f0-9]{64}",zip_digest):_reject()
-    prior=_template(before)["Resources"]; current=_template(candidate)["Resources"]
+    before = _template(before); candidate = _template(candidate)
+    if {k:v for k,v in before.items() if k != "Resources"} != {k:v for k,v in candidate.items() if k != "Resources"}: _reject()
+    prior=before["Resources"]; current=candidate["Resources"]
+    if identical_package:
+        if environment != "test" or code_pointer_candidate(before, candidate) != candidate: _reject()
+        if len(changes) != 1 or changes[0].get("ResourceChange", {}).get("LogicalResourceId") != "ConfigRuntimeReadFunction": _reject()
     function="ConfigRuntimeReadFunction"
     old=copy.deepcopy(prior[function]);new=copy.deepcopy(current[function])
     old["Properties"].pop("Code",None);code=new["Properties"].pop("Code",None)
@@ -72,6 +337,20 @@ def require_versioned_bucket(profile):
     if state.get("Status")!="Enabled":_reject()
 
 
+def lambda_task_url(location):
+    """Only regional Lambda-owned task buckets; signed coordinates stay in memory."""
+    if not isinstance(location, str) or any(ord(char) < 32 for char in location): _reject()
+    try:
+        url = urlsplit(location)
+        port = url.port
+    except ValueError:
+        _reject()
+    if (url.scheme != "https" or port not in (None, 443) or url.username is not None or url.password is not None
+        or url.fragment or not re.fullmatch(
+            r"(?:awslambda-us-east-1|prod-[0-9]{2}-[0-9]{4})-tasks\.s3\.us-east-1\.amazonaws\.com", str(url.hostname))): _reject()
+    return url
+
+
 def live_test_zip(expected):
     stack=aws("cloudformation","describe-stacks","--stack-name",PROFILES["test"]["stack"])["Stacks"]
     if len(stack)!=1 or stack[0].get("StackStatus") not in {"CREATE_COMPLETE","UPDATE_COMPLETE"}:_reject()
@@ -80,9 +359,8 @@ def live_test_zip(expected):
     alias=aws("lambda","get-alias","--function-name",function,"--name","live")
     if not re.fullmatch(r"[1-9][0-9]*",alias.get("FunctionVersion","")):_reject()
     result=aws("lambda","get-function","--function-name",function,"--qualifier",alias["FunctionVersion"])
-    config=result["Configuration"];location=result["Code"]["Location"];url=urlsplit(location)
-    if (url.scheme!="https" or url.hostname!="awslambda-us-east-1-tasks.s3.us-east-1.amazonaws.com" or url.username or url.password
-        or config.get("State")!="Active" or config.get("LastUpdateStatus")!="Successful"
+    config=result["Configuration"];location=result["Code"]["Location"];lambda_task_url(location)
+    if (config.get("State")!="Active" or config.get("LastUpdateStatus")!="Successful"
         or config.get("CodeSha256")!=base64.b64encode(hashlib.sha256(expected).digest()).decode()):_reject()
     # The signed URL stays in memory and is never an argument, log or artifact.
     with urlopen(location,timeout=20) as response:
@@ -148,6 +426,19 @@ def baseline(profile):
     return result
 
 
+def release_snapshot(profile, package, candidate_text=None):
+    snapshot = baseline(profile)
+    if profile == PROFILES["test"]:
+        if len(snapshot["functions"]) != 1: _reject()
+        snapshot["runtimeManagement"] = runtime_management(snapshot["functions"][0], snapshot["processed"])
+        snapshot["testReleaseBinding"] = test_release_binding(snapshot, package)
+        if candidate_text is not None:
+            snapshot["sourceReference"] = sam_source_reference(snapshot, candidate_text)
+    else:
+        snapshot["testBinding"] = live_test_zip(package)
+    return snapshot
+
+
 def _canonical(value):return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
 
 
@@ -191,8 +482,14 @@ def main():
     package=(args.release_root/"runtime-read.zip").read_bytes();zip_digest=hashlib.sha256(package).hexdigest()
     code_sha=base64.b64encode(bytes.fromhex(zip_digest)).decode()
     if (args.release_root/"lambda-code-sha256.txt").read_bytes()!=(code_sha+"\n").encode():_reject()
-    snapshot=baseline(profile)
-    if args.environment=="production":snapshot["testBinding"]=live_test_zip(package)
+    text=(args.release_root/"template.yaml").read_text(encoding="utf-8")
+    snapshot=release_snapshot(profile, package, text)
+    identical = args.environment == "test" and snapshot["testReleaseBinding"]["identicalPackage"]
+    if args.environment == "test":
+        # Validate the complete promoted source before any package or preview write.
+        current_code = _template(snapshot["processed"])["Resources"]["ConfigRuntimeReadFunction"]["Properties"]["Code"]
+        projected, params = project_test_template(text, snapshot, current_code)
+        code_pointer_candidate(snapshot["processed"], projected, params)
     with tempfile.TemporaryDirectory(prefix="thn-native-release-") as temp:
         tmp=Path(temp)
         if args.execution=="review":
@@ -207,7 +504,6 @@ def main():
             if not isinstance(version,str) or not version or version=="null":_reject()
             aws("s3api","get-object","--bucket",profile["bucket"],"--expected-bucket-owner","765932874577","--key",key,"--version-id",version,str(tmp/"sealed.zip"))
             if (tmp/"sealed.zip").read_bytes()!=package:_reject()
-            text=(args.release_root/"template.yaml").read_text(encoding="utf-8")
             anchor="      CodeUri: runtime-read.zip\n"
             if text.count(anchor)!=1:_reject()
             if args.environment=="production":
@@ -217,12 +513,21 @@ def main():
                     if text.count(line)!=1:_reject()
                     text=text.replace(line,"")
             uri="      CodeUri:\n"+"".join(f"        {k}: {json.dumps(v)}\n" for k,v in (("Bucket",profile["bucket"]),("Key",key),("Version",version)))
-            candidate=tmp/"candidate.yaml";candidate.write_text(text.replace(anchor,uri),encoding="utf-8",newline="\n")
+            candidate=tmp/"candidate.yaml"
+            if args.environment == "test":
+                code = {"S3Bucket": profile["bucket"], "S3Key": key, "S3ObjectVersion": version}
+                projected, params = project_test_template(text, snapshot, code)
+                neutral_candidate = code_pointer_candidate(snapshot["processed"], projected, params)
+                if identical:
+                    candidate.write_bytes(_canonical(neutral_candidate))
+                else:
+                    candidate.write_text(text.replace(anchor,uri),encoding="utf-8",newline="\n")
+            else:
+                candidate.write_text(text.replace(anchor,uri),encoding="utf-8",newline="\n")
             run=os.getenv("GITHUB_RUN_ID","");attempt=os.getenv("GITHUB_RUN_ATTEMPT","")
             if not re.fullmatch(r"[1-9][0-9]*",run) or not re.fullmatch(r"[1-9][0-9]*",attempt):_reject()
             parameters=tmp/"parameters.json";parameters.write_bytes(_canonical([{"ParameterKey":item["ParameterKey"],"UsePreviousValue":True} for item in snapshot["parameters"]]))
-            immediate=baseline(profile)
-            if args.environment=="production":immediate["testBinding"]=live_test_zip(package)
+            immediate=release_snapshot(profile, package, text)
             if immediate!=snapshot:_reject()
             change=aws("cloudformation","create-change-set","--stack-name",profile["stack"],"--change-set-name",f"thn-runtime-{run}-{attempt}",
                 "--change-set-type","UPDATE","--template-body","file://"+str(candidate),"--parameters","file://"+str(parameters),
@@ -236,25 +541,33 @@ def main():
         if description.get("ChangeSetId")!=change or description.get("StackId")!=snapshot["stackId"] or description.get("Status")!="CREATE_COMPLETE" or description.get("ExecutionStatus")!="AVAILABLE":_reject()
         original=aws("cloudformation","get-template","--stack-name",profile["stack"],"--change-set-name",change,"--template-stage","Original")["TemplateBody"]
         processed=aws("cloudformation","get-template","--stack-name",profile["stack"],"--change-set-name",change,"--template-stage","Processed")["TemplateBody"]
-        review_resources(snapshot["processed"],processed,description["Changes"],args.environment,args.source_sha,zip_digest)
+        review_resources(snapshot["processed"],processed,description["Changes"],args.environment,args.source_sha,zip_digest,identical_package=identical)
         code=_template(processed)["Resources"]["ConfigRuntimeReadFunction"]["Properties"]["Code"]
+        if args.environment == "test":
+            projected, params = project_test_template(text, snapshot, code)
+            expected = code_pointer_candidate(snapshot["processed"], projected, params)
+            if identical:
+                if expected != _template(processed) or _template(original) != expected: _reject()
+            else:
+                resolver = sam_libraries()[-1](params)
+                if resolver.resolve_parameter_refs(copy.deepcopy(projected)) != resolver.resolve_parameter_refs(copy.deepcopy(_template(processed))): _reject()
         aws("s3api","get-object","--bucket",code["S3Bucket"],"--expected-bucket-owner","765932874577","--key",code["S3Key"],"--version-id",code["S3ObjectVersion"],str(tmp/"reviewed.zip"))
         if (tmp/"reviewed.zip").read_bytes()!=package:_reject()
         digest=preview_digest(snapshot,description,original,processed,args.source_sha,args.manifest_digest,zip_digest)
-        fresh=baseline(profile)
-        if args.environment=="production":fresh["testBinding"]=live_test_zip(package)
+        fresh=release_snapshot(profile, package, text)
         if fresh!=snapshot:_reject()
         if args.execution=="execute":
             if digest!=args.review_digest:_reject()
             review_window(description)
-            immediate=baseline(profile)
-            if args.environment=="production":immediate["testBinding"]=live_test_zip(package)
+            immediate=release_snapshot(profile, package, text)
             if immediate!=snapshot:_reject()
             aws("cloudformation","execute-change-set","--stack-name",profile["stack"],"--change-set-name",change)
             wait=subprocess.run(["aws","cloudformation","wait","stack-update-complete","--stack-name",profile["stack"]],capture_output=True)
             if wait.returncode:_reject()
-            after=baseline(profile)
+            after=release_snapshot(profile, package)
             verify_preserved_state(snapshot,after,args.environment,code_sha)
+            if args.environment == "test" and _canonical(_template(after["processed"])) != _canonical(_template(processed)): _reject()
+            if identical: verify_neutral_state(snapshot, after, code)
             if args.environment=="production" and live_test_zip(package)!=snapshot["testBinding"]:_reject()
         else:
             with open(os.environ["GITHUB_STEP_SUMMARY"],"a",encoding="utf-8") as summary:
