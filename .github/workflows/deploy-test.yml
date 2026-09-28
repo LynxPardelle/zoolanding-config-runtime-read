@@ -39,6 +39,7 @@ jobs:
       manifest_digest: ${{ steps.artifact_metadata.outputs.manifest_digest }}
       source_only: ${{ steps.release_mode.outputs.source_only }}
       operator_digest: ${{ steps.artifact_metadata.outputs.operator_digest }}
+      authority_digest: ${{ steps.artifact_metadata.outputs.authority_digest }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -121,6 +122,8 @@ jobs:
           [[ "$manifest_digest" =~ ^[a-f0-9]{64}$ ]]
           printf 'artifact_name=%s\nmanifest_digest=%s\n' "$artifact_name" "$manifest_digest" >> "$GITHUB_OUTPUT"
           cp tools/native_runtime_release.py .aws-sam/native-runtime-release.py
+          cp tools/native_release_authority.py .aws-sam/native_release_authority.py
+          printf 'authority_digest=%s\n' "$(sha256sum .aws-sam/native_release_authority.py | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
           operator_digest="$(sha256sum .aws-sam/native-runtime-release.py | cut -d ' ' -f1)"
           printf 'operator_digest=%s\n' "$operator_digest" >> "$GITHUB_OUTPUT"
 
@@ -135,6 +138,7 @@ jobs:
             .aws-sam/release/lambda-code-sha256.txt
             .aws-sam/release-manifest.sha256
             .aws-sam/native-runtime-release.py
+            .aws-sam/native_release_authority.py
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 1
@@ -156,6 +160,7 @@ jobs:
       REVIEW_DIGEST: ${{ inputs.review_digest }}
       REVIEW_CHANGE_SET_ARN: ${{ inputs.review_change_set_arn }}
       OPERATOR_DIGEST: ${{ needs.validate.outputs.operator_digest }}
+      EXPECTED_AUTHORITY_DIGEST: ${{ needs.validate.outputs.authority_digest }}
     permissions:
       contents: read
       id-token: write
@@ -215,6 +220,12 @@ jobs:
           actual_code_sha256="$(openssl dgst -sha256 -binary .aws-sam/release/runtime-read.zip | openssl base64 -A)"
           test "$actual_code_sha256" = "$expected_code_sha256"
           test "$(grep -Fc 'CodeUri: runtime-read.zip' .aws-sam/release/template.yaml)" -eq 1
+          if [[ -n "$(find .aws-sam -type l -print -quit)" ]]; then exit 1; fi
+          printf '%s\n' './native-runtime-release.py' './native_release_authority.py' './release-manifest.sha256' './release/lambda-code-sha256.txt' './release/runtime-read.zip' './release/template.yaml' | LC_ALL=C sort > "$RUNNER_TEMP/expected-transport-files.txt"
+          (cd .aws-sam && LC_ALL=C find . -type f -print | LC_ALL=C sort) > "$RUNNER_TEMP/actual-transport-files.txt"
+          diff -u "$RUNNER_TEMP/expected-transport-files.txt" "$RUNNER_TEMP/actual-transport-files.txt"
+          [[ "$EXPECTED_AUTHORITY_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_AUTHORITY_DIGEST" .aws-sam/native_release_authority.py | sha256sum --check --strict -
           [[ "$OPERATOR_DIGEST" =~ ^[a-f0-9]{64}$ ]]
           test "$(sha256sum .aws-sam/native-runtime-release.py | cut -d ' ' -f1)" = "$OPERATOR_DIGEST"
 
@@ -299,7 +310,7 @@ jobs:
             core.info('promotion_provenance_verified');
             if (context.eventName === 'workflow_dispatch') {
             const activationFail = () => { throw new Error('activation_selection_rejected'); };
-            const selection = JSON.parse(require('node:child_process').execFileSync('python3', ['-c', 'import json,os;from tools.verify_source_only_promotion import parse_selection;print(json.dumps(parse_selection(os.getenv("ACTIVATION_SELECTION_JSON","null"))))'], {encoding:'utf8'}));
+            const selection = JSON.parse(require('node:child_process').execFileSync('python3', ['-c', 'import json,os;import sys;sys.path.insert(0,".aws-sam");from native_release_authority import parse_selection;print(json.dumps(parse_selection(os.getenv("ACTIVATION_SELECTION_JSON","null"))))'], {encoding:'utf8'}));
             if (context.eventName !== 'workflow_dispatch' || !['review','execute'].includes(process.env.EXECUTION)
               || (process.env.EXECUTION === 'review' && (process.env.REVIEW_DIGEST || process.env.REVIEW_CHANGE_SET_ARN))
               || (process.env.EXECUTION === 'execute' && (!/^[a-f0-9]{64}$/.test(process.env.REVIEW_DIGEST ?? '') || !/^arn:aws:cloudformation:us-east-1:765932874577:changeSet\/thn-runtime-[1-9][0-9]*-[1-9][0-9]*\/[a-f0-9-]+$/.test(process.env.REVIEW_CHANGE_SET_ARN ?? '')))
