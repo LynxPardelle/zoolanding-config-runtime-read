@@ -271,3 +271,67 @@ sites/{domain}/versions/{versionId}/
 ```
 
 Shared domain-level files are optional. When they exist, the Lambda merges them first and then applies page-level overrides.
+
+
+## THN production promotion and reviewed activation
+
+THN source promotion is separate from activation. The repository-scoped production
+selection has exactly `schemaVersion`, `mode`, `sourceSha`, `sourceTree`,
+`targetBaseSha`, and `mergeTree`; mode is `thn-source-only` and schema version is 1.
+The verifier checks the current source branch, both native merge parents, event
+before/after SHA, source tree and native merge tree. An absent, malformed or stale
+production selector fails before credentials. A selected promotion runs mandatory
+validation and omits AWS. Main-only source changes remain in the merged tree.
+
+The TEST selector suppresses AWS only for the exact reviewed THN promotion. With
+no TEST selector, the established automatic TEST merge/provenance path remains.
+A present invalid TEST selector fails. Production never uses that fallback.
+
+Manual activation requires the protected branch and a separate repository-scoped
+selection with exactly `schemaVersion: 1`, `mode: thn-reviewed-activation`, `sha`,
+`tree`, and `workflowSha256` (LF-normalized workflow bytes). This selection only
+binds source and operation; it does not approve AWS changes. `review` retains a
+native change set and reports its ARN and full inventory digest. `execute` must
+consume that same ARN and explicitly approved digest, with a fresh baseline and
+original/processed templates; it does not repackage or create another change set.
+
+A source-only, skipped deploy or review-only successful TEST run is not release
+provenance. Production requires the exact current TEST source and immutable
+artifact from a successful TEST deploy plus its post-deploy verification. No TEST
+account, QA writer mode or article data is copied to production.
+
+`THN Runtime Production Release` is the only manual production activation path;
+legacy production dispatch fails before credentials. It consumes the exact TEST
+`runtime-read.zip` bytes and verifies both members against the selected source.
+It also compares the live TEST alias ZIP before and after activation. Production
+keeps its existing function/API topology; TEST-only version/alias template fields
+are projected away without rebuilding the ZIP. Only production Lambda code can
+change. TEST may update its retained version and `live` alias. IAM, API, storage,
+parameters, environment configuration and replacements are rejected.
+
+The unprivileged job seals an allowlisted transport containing the TEST release
+and the current protected operation helper. The privileged job executes only that
+verified helper, without repository checkout or dependency installation. This is
+an explicit operation-tool artifact trust boundary; it does not change the two
+file Lambda inventory. Review uses a content-addressed S3 ZIP, requires bucket
+versioning and exact account ownership, pins object VersionId and reads back the
+bytes. The native digest includes operation SHA/helper hash and all resource
+changes. Postflight preserves function configuration and non-version identities.
+
+The dedicated THN v2 runtime maps server `ENVIRONMENT_NAME=prod|production` to
+canonical `production` and `test` to `test`. It requires exact journal-owner,
+`/auth-v2/runtime-config` and admin origin for that environment. Browser metadata
+cannot select the deployment profile. Legacy v1 and other registered domains
+retain their existing read-only behavior.
+
+Before activation, compare actual stack parameters, processed templates, Lambda,
+TEST alias/package, versioned objects, OIDC trust, deploy and execution roles,
+permissions boundaries and policies with AWS CLI. Missing identity, permission or
+configuration prerequisites stop activation; local unit shapes do not prove live
+AWS readiness. An empty or unexpected native inventory fails closed for diagnosis.
+
+### Retained production preview authority and expiry
+
+The protected production operation seals fresh live MAIN/TEST source, actual deployment/execution role identity and inline-policy hashes, and the native preview CreationTime. Execute is allowed for24hours from that native timestamp and repeats the authority checks at its mutation boundary. Authority tooling is transported and hashed separately from the unchanged trusted TEST Lambda ZIP. Current production execution-role identity is preserved. Newly attached managed policies or permissions boundaries require review before this closed role profile can activate.
+
+An expired or abandoned preview is cleaned by a separately approved operator. Capture `aws cloudformation describe-change-set --stack-name <exact-owned-production-stack> --change-set-name <reviewed-native-arn> --include-property-values`; compare the exact StackId, ChangeSetId, owned name prefix `thn-runtime-`, CreationTime, reviewed full native inventory and AVAILABLE execution state with the saved review. Then delete that same reviewed ARN using `aws cloudformation delete-change-set --stack-name <exact-owned-production-stack> --change-set-name <reviewed-native-arn>`. Record the approval, inspected inventory and deletion result privately. Production stack/resources retain their identities.

@@ -2209,6 +2209,21 @@ def _fallback_bundle(domain: str, page_id: str, metadata: Dict[str, Any], lifecy
     }
 
 
+def _validate_thn_protected_runtime(site_config: Dict[str, Any], environment: str) -> None:
+    # Only the dedicated THN v2 profile is closed here; generic/v1 sites retain
+    # their existing read-only projection and registered alias behavior.
+    runtime = site_config.get("runtime") if isinstance(site_config, dict) else None
+    auth = runtime.get("authRemote") if isinstance(runtime, dict) else None
+    if site_config.get("domain") != "thehairnarrative.com" or not isinstance(auth, dict) or not (auth.get("authProfileId") == "journal-owner" or str(auth.get("endpoint", "")).startswith("/auth-v2/")):
+        return
+    server_environment = {"test": "test", "prod": "production", "production": "production"}.get(os.getenv("ENVIRONMENT_NAME", ""))
+    origins = {"test": "https://admin-test.thehairnarrative.com", "production": "https://admin.thehairnarrative.com"}
+    if (server_environment is None or environment != server_environment
+        or auth.get("authProfileId") != "journal-owner" or auth.get("enabled") is not True or auth.get("endpoint") != "/auth-v2/runtime-config"
+        or auth.get("requiredOrigin") != origins[server_environment]):
+        raise ValueError("protected_runtime_profile_invalid")
+
+
 def _published_bundle(
     *,
     request_id: str,
@@ -2229,6 +2244,7 @@ def _published_bundle(
     fallback_from_domain: Optional[str] = None,
     article_bundle: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    _validate_thn_protected_runtime(payloads["siteConfig"], environment)
     variables_payload = _merge_content_hub_variables(
         _merge_variables(domain, page_id, payloads["sharedVariables"], payloads["pageVariables"]),
         payloads["siteConfig"],
