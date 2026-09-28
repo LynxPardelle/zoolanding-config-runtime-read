@@ -6,6 +6,7 @@ Use [../README.md](../README.md), code, tests, SAM configuration, and workflows 
 
 ## Migrated History
 
+- [Runtime identical-package release, 2026-09-28 CT](2026-09-28-runtime-identical-package-release.md)
 - [Published locale isolation, 2026-09-07 CT](2026-09-07-published-locale-isolation.md)
 - [THN empty-series locale isolation, 2026-09-08 CT](2026-09-08-thn-empty-series-locale.md)
 - [Immutable Runtime Read release artifact and live alias, 2026-08-30 CT](2026-08-30-immutable-runtime-release.md)
