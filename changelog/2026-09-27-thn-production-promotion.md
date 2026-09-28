@@ -16,3 +16,11 @@ Added closed source-only promotion and reviewed activation selectors, retained n
 
 - Preserve the existing `RuntimeApi` `SamResourceId` metadata in the source template because the bounded manual release does not run `sam package` metadata normalization.
 - Exercise the real release-template assembler and native review guard; missing or changed API metadata remains rejected. Lambda ZIP sources, IAM permissions and release guards are unchanged.
+
+
+## Verify managed production runtime patches after code activation
+
+- Preserve the exact runtime patch ARN in every review digest and fresh pre-execution baseline. Production reads the selected native function's runtime management mode and verifies it against its unchanged processed template.
+- After code activation, accept only a well-formed AWS managed patch ARN change under the same verified Auto or FunctionUpdate mode. Runtime identifier, architecture, package type, role, environment and all other configuration stay exact; Manual mode, runtime errors and malformed metadata remain rejected.
+- TEST retains its existing strict comparison and makes no new runtime management request. The operator and its transport hash change; Lambda package sources and templates do not.
+- The observed Authoring TEST Auto patch change demonstrated the guard risk. Different TEST and production patch ARNs alone do not predict a production patch update, because runtime ARNs also depend on architecture. Production activation still requires its own fresh native review and scoped metadata-read permission.

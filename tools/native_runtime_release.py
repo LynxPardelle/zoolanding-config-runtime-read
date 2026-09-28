@@ -92,6 +92,40 @@ def live_test_zip(expected):
         "aliasRevision":alias.get("RevisionId"),"codeSha256":config["CodeSha256"],"revision":config.get("RevisionId")}
 
 
+def runtime_management(function,processed):
+    if not re.fullmatch(r"arn:aws:lambda:us-east-1:765932874577:function:[a-zA-Z0-9_-]+",str(function.get("FunctionArn",""))):_reject()
+    response=aws("lambda","get-runtime-management-config","--function-name",function["FunctionName"])
+    if (not isinstance(response,dict) or set(response)-{"FunctionArn","UpdateRuntimeOn","RuntimeVersionArn","ResponseMetadata"}
+        or response.get("FunctionArn")!=function.get("FunctionArn")):_reject()
+    mode=response.get("UpdateRuntimeOn");arn=response.get("RuntimeVersionArn")
+    if mode not in {"Auto","FunctionUpdate","Manual"}:_reject()
+    patch=function.get("RuntimeVersionConfig")
+    if (not isinstance(patch,dict) or set(patch)!={"RuntimeVersionArn"}
+        or not isinstance(patch["RuntimeVersionArn"],str)
+        or not re.fullmatch(r"arn:aws:lambda:us-east-1::runtime:[a-f0-9]{64}",patch["RuntimeVersionArn"])):_reject()
+    if mode=="Manual":
+        if arn!=patch["RuntimeVersionArn"]:_reject()
+    elif arn is not None:_reject()
+    result={"UpdateRuntimeOn":mode,**({"RuntimeVersionArn":arn} if mode=="Manual" else {})}
+    expected=_template(processed)["Resources"]["ConfigRuntimeReadFunction"]["Properties"].get("RuntimeManagementConfig",{"UpdateRuntimeOn":"Auto"})
+    if result!=expected:_reject()
+    return result
+
+
+def same_managed_patch_configuration(left,right,management):
+    if management not in ({"UpdateRuntimeOn":"Auto"},{"UpdateRuntimeOn":"FunctionUpdate"}):return False
+    normalized=[]
+    for function in (left,right):
+        patch=function.get("RuntimeVersionConfig")
+        if (not isinstance(patch,dict) or set(patch)!={"RuntimeVersionArn"}
+            or not isinstance(patch["RuntimeVersionArn"],str)
+            or not re.fullmatch(r"arn:aws:lambda:us-east-1::runtime:[a-f0-9]{64}",patch["RuntimeVersionArn"])
+            or function.get("Runtime")!="python3.13" or function.get("PackageType")!="Zip"
+            or function.get("Architectures") not in (["x86_64"],["arm64"])):return False
+        normalized.append({**function,"RuntimeVersionConfig":{"RuntimeVersionArn":"aws-managed-patch"}})
+    return normalized[0]==normalized[1]
+
+
 def baseline(profile):
     if os.getenv("AWS_REGION")!="us-east-1" or aws("sts","get-caller-identity").get("Account")!="765932874577":_reject()
     stacks=aws("cloudformation","describe-stacks","--stack-name",profile["stack"])["Stacks"]
@@ -104,10 +138,14 @@ def baseline(profile):
     authority={}
     if profile["stack"]==PROFILES["production"]["stack"]:
         authority={"sourceAuthority":source_authority(os.environ),"permissionAuthority":permission_authority(os.environ.get("GITHUB_REPOSITORY"),aws)}
-    return {**authority,"cloudFormationRoleArn":stack.get("RoleARN"),"stackId":stack["StackId"],"parameters":sorted(stack.get("Parameters",[]),key=lambda item:item["ParameterKey"]),
+    result={**authority,"cloudFormationRoleArn":stack.get("RoleARN"),"stackId":stack["StackId"],"parameters":sorted(stack.get("Parameters",[]),key=lambda item:item["ParameterKey"]),
         "outputs":sorted(stack.get("Outputs",[]),key=lambda item:item["OutputKey"]),"identities":identities,"functions":functions,
         "original":aws("cloudformation","get-template","--stack-name",profile["stack"],"--template-stage","Original")["TemplateBody"],
         "processed":aws("cloudformation","get-template","--stack-name",profile["stack"],"--template-stage","Processed")["TemplateBody"]}
+    if profile["stack"]==PROFILES["production"]["stack"]:
+        if len(functions)!=1:_reject()
+        result["runtimeManagement"]=runtime_management(functions[0],result["processed"])
+    return result
 
 
 def _canonical(value):return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
@@ -126,7 +164,7 @@ def preview_digest(snapshot,description,original,processed,source_sha,manifest_d
 
 
 def verify_preserved_state(before,after,environment,code_sha):
-    for key in ("stackId","parameters","outputs","sourceAuthority","permissionAuthority","cloudFormationRoleArn"):
+    for key in ("stackId","parameters","outputs","sourceAuthority","permissionAuthority","cloudFormationRoleArn","runtimeManagement"):
         if before.get(key)!=after.get(key):_reject()
     def stable_identities(snapshot):
         return [item for item in snapshot["identities"] if environment!="test" or item["ResourceType"]!="AWS::Lambda::Version"]
@@ -135,7 +173,7 @@ def verify_preserved_state(before,after,environment,code_sha):
     left=copy.deepcopy(before["functions"][0]);right=copy.deepcopy(after["functions"][0])
     for key in ("CodeSha256","CodeSize","LastModified","RevisionId","LastUpdateStatus","LastUpdateStatusReason","LastUpdateStatusReasonCode"):
         left.pop(key,None);right.pop(key,None)
-    if left!=right:_reject()
+    if left!=right and (environment!="production" or not same_managed_patch_configuration(left,right,before.get("runtimeManagement"))):_reject()
 
 
 def main():
