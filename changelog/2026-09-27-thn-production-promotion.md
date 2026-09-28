@@ -11,3 +11,8 @@ Added closed source-only promotion and reviewed activation selectors, retained n
 - Reproduce missing-module failures locally; test isolated parser/operator execution and duplicate selector, absent helper and substituted helper rejection.
 
 - CI dependency correction: the new transport regressions extract unique literal workflow blocks using only the Python standard library. They no longer inherit PyYAML from a local development environment. Both modules pass with site-packages disabled (`python -S`), preserving the actual isolated parser/operator commands and hash-substitution rejection.
+
+## Retain Runtime API metadata in native releases
+
+- Preserve the existing `RuntimeApi` `SamResourceId` metadata in the source template because the bounded manual release does not run `sam package` metadata normalization.
+- Exercise the real release-template assembler and native review guard; missing or changed API metadata remains rejected. Lambda ZIP sources, IAM permissions and release guards are unchanged.
