@@ -1,0 +1,201 @@
+name: THN Runtime Production Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      execution:
+        type: choice
+        options: [review, execute]
+        default: review
+        required: true
+      source_run_id:
+        type: string
+        required: true
+      source_artifact_id:
+        type: string
+        required: true
+      source_sha:
+        type: string
+        required: true
+      source_manifest_sha256:
+        type: string
+        required: true
+      review_digest:
+        type: string
+        required: false
+      review_change_set_arn:
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: runtime-read-production-${{ github.repository }}-refs/heads/main
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      transport_digest: ${{ steps.transport.outputs.digest }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_sha256 }}
+      ACTIVATION_SELECTION_JSON: ${{ vars.RUNTIME_PRODUCTION_ACTIVATION_SELECTION_JSON }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22.23.2'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Verify protected main and reviewed tooling
+        run: python tools/verify_source_only_promotion.py --target=main --workflow=thn-runtime-production.yml
+      - name: Verify exact merged TEST provenance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/verify-promotion-commit.mjs --source=test --target=main
+      - name: Resolve actual successful Deploy Test artifact
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$SOURCE_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          test "$(git show -s --format=%P "$GITHUB_SHA" | awk '{print $2}')" = "$SOURCE_SHA"
+          python tools/resolve_promoted_runtime_release.py --run-id "$SOURCE_RUN_ID" --artifact-id "$SOURCE_ARTIFACT_ID" --source-sha "$SOURCE_SHA"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ inputs.source_artifact_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+          path: .aws-sam/promoted
+      - name: Verify exact ZIP against promoted and current main code
+        run: |
+          set -euo pipefail
+          python tools/verify_promoted_runtime_release.py --root .aws-sam/promoted/release --manifest .aws-sam/promoted/release-manifest.sha256 --expected-digest "$SOURCE_MANIFEST_DIGEST" --source-sha "$SOURCE_SHA"
+          python tools/verify_promoted_runtime_release.py --root .aws-sam/promoted/release --manifest .aws-sam/promoted/release-manifest.sha256 --expected-digest "$SOURCE_MANIFEST_DIGEST" --source-sha "$GITHUB_SHA"
+          cp tools/native_runtime_release.py .aws-sam/promoted/native-runtime-release.py
+          cp tools/native_release_authority.py .aws-sam/promoted/native_release_authority.py
+      - name: Seal exact transport including reviewed operator tooling
+        id: transport
+        run: |
+          set -euo pipefail
+          (cd .aws-sam/promoted && LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > .aws-sam/transport.sha256
+          digest="$(sha256sum .aws-sam/transport.sha256 | cut -d ' ' -f1)"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: runtime-production-sealed-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: |
+            .aws-sam/promoted/release/
+            .aws-sam/promoted/release-manifest.sha256
+            .aws-sam/promoted/native-runtime-release.py
+            .aws-sam/promoted/native_release_authority.py
+            .aws-sam/transport.sha256
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      SAM_CLI_TELEMETRY: 0
+      AWS_CLOUDFORMATION_ROLE_ARN: ${{ vars.AWS_CLOUDFORMATION_ROLE_ARN }}
+      TRANSPORT_DIGEST: ${{ needs.validate.outputs.transport_digest }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_sha256 }}
+      EXECUTION: ${{ inputs.execution }}
+      REVIEW_DIGEST: ${{ inputs.review_digest }}
+      REVIEW_CHANGE_SET_ARN: ${{ inputs.review_change_set_arn }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate transport coordinates before download
+        env:
+          ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TRANSPORT_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          test "$AWS_CLOUDFORMATION_ROLE_ARN" = arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-production-cfn-exec
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifact_id }}
+          path: .aws-sam
+      - name: Verify sealed transport and strict operator inventory
+        run: |
+          set -euo pipefail
+          test "$(sha256sum .aws-sam/transport.sha256 | cut -d ' ' -f1)" = "$TRANSPORT_DIGEST"
+          (cd .aws-sam/promoted && sha256sum --check --strict ../transport.sha256)
+          printf '%s\n' './native-runtime-release.py' './native_release_authority.py' './release-manifest.sha256' './release/lambda-code-sha256.txt' './release/runtime-read.zip' './release/template.yaml' | LC_ALL=C sort > "$RUNNER_TEMP/expected-files"
+          (cd .aws-sam/promoted && LC_ALL=C find . -type f -print | LC_ALL=C sort) > "$RUNNER_TEMP/actual-files"
+          diff -u "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/actual-files"
+          test -z "$(find .aws-sam/promoted -type l -print -quit)"
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          ACTIVATION_SELECTION_JSON: ${{ vars.RUNTIME_PRODUCTION_ACTIVATION_SELECTION_JSON }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fail = () => { throw new Error('runtime_release_provenance_rejected'); };
+            if (context.eventName !== 'workflow_dispatch' || process.env.GITHUB_REF !== 'refs/heads/main'
+              || !['review','execute'].includes(process.env.EXECUTION)
+              || (process.env.EXECUTION === 'execute' && (!/^[a-f0-9]{64}$/.test(process.env.REVIEW_DIGEST ?? '') || !/^arn:aws:cloudformation:us-east-1:765932874577:changeSet\/thn-runtime-[1-9][0-9]*-[1-9][0-9]*\/[a-f0-9-]+$/.test(process.env.REVIEW_CHANGE_SET_ARN ?? '')))
+              || (process.env.EXECUTION === 'review' && (process.env.REVIEW_DIGEST || process.env.REVIEW_CHANGE_SET_ARN))) fail();
+            const {owner,repo}=context.repo;
+            const selection=JSON.parse(require('node:child_process').execFileSync('python3', ['-c', 'import json,os;from tools.verify_source_only_promotion import parse_selection;print(json.dumps(parse_selection(os.getenv("ACTIVATION_SELECTION_JSON","null"))))'], {encoding:'utf8'}));
+            const {data:commit}=await github.rest.git.getCommit({owner,repo,commit_sha:context.sha});
+            const {data:branch}=await github.rest.repos.getBranch({owner,repo,branch:'main'});
+            const {data:source}=await github.rest.repos.getBranch({owner,repo,branch:'test'});
+            if (!selection || Object.keys(selection).sort().join(',') !== 'mode,schemaVersion,sha,tree,workflowSha256'
+              || selection.schemaVersion !== 1 || selection.mode !== 'thn-reviewed-activation' || selection.sha !== context.sha
+              || selection.tree !== commit.tree.sha || branch.commit.sha !== context.sha || commit.parents.length !== 2
+              || commit.parents[1].sha !== process.env.SOURCE_SHA || source.commit.sha !== process.env.SOURCE_SHA) fail();
+            const {data:workflow}=await github.rest.repos.getContent({owner,repo,path:'.github/workflows/thn-runtime-production.yml',ref:context.sha});
+            if (workflow.encoding !== 'base64' || require('node:crypto').createHash('sha256').update(Buffer.from(workflow.content,'base64').toString('utf8').replace(/\r\n/g,'\n')).digest('hex') !== selection.workflowSha256) fail();
+            const {data:run}=await github.rest.actions.getWorkflowRun({owner,repo,run_id:Number(process.env.SOURCE_RUN_ID)});
+            const {data:artifact}=await github.rest.actions.getArtifact({owner,repo,artifact_id:Number(process.env.SOURCE_ARTIFACT_ID)});
+            if (run.path !== '.github/workflows/deploy-test.yml' || run.name !== 'Deploy Test' || run.head_sha !== process.env.SOURCE_SHA
+              || run.head_branch !== 'test' || run.status !== 'completed' || run.conclusion !== 'success'
+              || !['push','workflow_dispatch'].includes(run.event) || artifact.expired !== false
+              || artifact.name !== `runtime-read-test-build-${run.id}-${run.run_attempt}-${process.env.SOURCE_SHA}`
+              || artifact.workflow_run?.id !== run.id || artifact.workflow_run?.head_sha !== process.env.SOURCE_SHA) fail();
+            const {data:jobs}=await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs',{owner,repo,run_id:run.id,attempt_number:run.run_attempt,per_page:100});
+            if (jobs.total_count !== jobs.jobs?.length || jobs.jobs.filter(job => job.name === 'deploy' && job.conclusion === 'success'
+              && job.head_sha === process.env.SOURCE_SHA && ['Deploy test','Verify immutable live alias'].every(name => job.steps?.some(step => step.name === name && step.conclusion === 'success'))).length !== 1) fail();
+      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Review or execute the exact retained production preview
+        run: |
+          set -euo pipefail
+          python3 .aws-sam/promoted/native-runtime-release.py --environment=production --execution="$EXECUTION" --release-root=.aws-sam/promoted/release --manifest-digest="$SOURCE_MANIFEST_DIGEST" --source-sha="$SOURCE_SHA" --review-digest="$REVIEW_DIGEST" --review-change-set-arn="$REVIEW_CHANGE_SET_ARN"

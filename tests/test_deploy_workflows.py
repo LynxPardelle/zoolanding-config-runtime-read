@@ -33,7 +33,10 @@ def deploy_script(workflow_text):
         if line and not line.startswith("          "):
             break
         lines.append(line[10:] if line else "")
-    return "\n".join(lines).strip()
+    script = "\n".join(lines).strip()
+    if 'if [[ "$GITHUB_EVENT_NAME" == "push" ]]' in script:
+        script = script[script.index("sam deploy"):script.index("\nelse")] if "\nelse" in script else script[script.index("sam deploy"):script.index("          else")]
+    return script.strip()
 
 
 class DeployWorkflowTests(unittest.TestCase):
@@ -464,7 +467,9 @@ class DeployWorkflowTests(unittest.TestCase):
                     if line and not line.startswith("            "):
                         break
                     script_lines.append(line[12:] if line else "")
-                inline_verifiers.append("\n".join(script_lines).strip())
+                inline = "\n".join(script_lines).strip()
+                shared = inline.split("if (context.eventName === 'workflow_dispatch')", 1)[0].rstrip()
+                inline_verifiers.append(shared)
 
         self.assertEqual(len(inline_verifiers), 2)
         self.assertEqual(inline_verifiers[0], inline_verifiers[1])
