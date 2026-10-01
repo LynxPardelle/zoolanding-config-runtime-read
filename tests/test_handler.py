@@ -51,12 +51,12 @@ class RuntimeHandlerTest(unittest.TestCase):
     def setUp(self):
         self.handler = importlib.reload(importlib.import_module("lambda_function"))
         self.metadata = {
-            "pk": "SITE#pamelabetancourt.com",
+            "pk": "SITE#example.com",
             "sk": "METADATA",
-            "domain": "pamelabetancourt.com",
-            "aliases": ["pamelabetancourt.com"],
+            "domain": "example.com",
+            "aliases": ["example.com"],
             "environmentAliases": {
-                "test": ["test.pamelabetancourt.com", "test.pamelabetancourt.zoolandingpage.com.mx"]
+                "test": ["test.example.com", "test.example.zoolandingpage.com.mx"]
             },
             "defaultPageId": "default",
             "routes": [{"path": "/", "pageId": "default"}],
@@ -65,8 +65,8 @@ class RuntimeHandlerTest(unittest.TestCase):
                     "hubId": "main",
                     "name": "Blog",
                     "defaultLanguage": "es",
-                    "canonicalDraftDomain": "pamelabetancourt.com",
-                    "allowedDraftDomains": ["pamelabetancourt.com", "sulandingpage.com.mx"],
+                    "canonicalDraftDomain": "example.com",
+                    "allowedDraftDomains": ["example.com", "sulandingpage.com.mx"],
                     "articleIds": ["primer-post"],
                     "serverOnly": {"token": "must-not-render"},
                 }
@@ -101,16 +101,16 @@ class RuntimeHandlerTest(unittest.TestCase):
             },
         }
         self.items = {
-            ("SITE#pamelabetancourt.com", "METADATA"): self.metadata,
+            ("SITE#example.com", "METADATA"): self.metadata,
             ("SITE#zoolandingpage.com.mx", "METADATA"): self.canonical_metadata,
-            ("ALIAS#test.pamelabetancourt.com", "SITE"): {
-                "domain": "pamelabetancourt.com",
-                "alias": "test.pamelabetancourt.com",
+            ("ALIAS#test.example.com", "SITE"): {
+                "domain": "example.com",
+                "alias": "test.example.com",
                 "environment": "test",
             },
-            ("ALIAS#pamelabetancourt.com", "SITE"): {
-                "domain": "pamelabetancourt.com",
-                "alias": "pamelabetancourt.com",
+            ("ALIAS#example.com", "SITE"): {
+                "domain": "example.com",
+                "alias": "example.com",
                 "environment": "production",
             },
         }
@@ -122,9 +122,9 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.content_hub_item_reads = []
 
         for prefix in ("prod-prefix", "test-prefix", "dev-prefix"):
-            self.put_site(prefix, "pamelabetancourt.com", include_not_found=True)
-            self.put_page(prefix, "pamelabetancourt.com", "default", "Hero")
-            self.put_page(prefix, "pamelabetancourt.com", "not-found", "Page not found")
+            self.put_site(prefix, "example.com", include_not_found=True)
+            self.put_page(prefix, "example.com", "default", "Hero")
+            self.put_page(prefix, "example.com", "not-found", "Page not found")
 
         for prefix in ("canonical-prod-prefix", "canonical-test-prefix"):
             self.put_site(prefix, "zoolandingpage.com.mx", include_not_found=True)
@@ -240,7 +240,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             {"path": "/soft-landing-china/zh", "pageId": "soft-landing-china", "language": "zh"},
         ]
         self.metadata["routes"].extend(dict(route) for route in routes)
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {
                 "defaultLanguage": "es",
@@ -252,22 +252,22 @@ class RuntimeHandlerTest(unittest.TestCase):
             }
         }
         site_config["routes"].extend(dict(route) for route in routes)
-        self.put_page("test-prefix", "pamelabetancourt.com", "soft-landing-china", "China campaign")
+        self.put_page("test-prefix", "example.com", "soft-landing-china", "China campaign")
         self.put_payload(
             "test-prefix",
-            "pamelabetancourt.com",
+            "example.com",
             "i18n/zh.json",
             {"lang": "zh", "dictionary": {"shared": "共享"}},
         )
         self.put_payload(
             "test-prefix",
-            "pamelabetancourt.com",
+            "example.com",
             "soft-landing-china/i18n/zh.json",
             {"pageId": "soft-landing-china", "lang": "zh", "dictionary": {"title": "中国业务落地"}},
         )
 
     def configure_fixed_not_found_route(self, language="en"):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {
                 "defaultLanguage": "es",
@@ -283,19 +283,19 @@ class RuntimeHandlerTest(unittest.TestCase):
         site_route["language"] = language
         self.put_payload(
             "test-prefix",
-            "pamelabetancourt.com",
+            "example.com",
             "i18n/zh.json",
             {"lang": "zh", "dictionary": {"shared": "共享"}},
         )
         self.put_payload(
             "test-prefix",
-            "pamelabetancourt.com",
+            "example.com",
             "not-found/i18n/zh.json",
             {"pageId": "not-found", "lang": "zh", "dictionary": {"title": "未找到页面"}},
         )
 
     def assert_route_language_failure_is_public_and_generic(self, source, value):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {
                 "defaultLanguage": "es",
@@ -314,7 +314,7 @@ class RuntimeHandlerTest(unittest.TestCase):
 
         with redirect_stdout(output):
             response = self.handler.lambda_handler(
-                event("api.zoolandingpage.com.mx", domain="pamelabetancourt.com", environment="test"),
+                event("api.zoolandingpage.com.mx", domain="example.com", environment="test"),
                 Context(),
             )
 
@@ -326,11 +326,11 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertFalse(any("/i18n/" in key for key in self.loaded_keys))
         self.assertEqual(
             self.loaded_keys,
-            ["test-prefix/pamelabetancourt.com/site-config.json"],
+            ["test-prefix/example.com/site-config.json"],
         )
 
     def test_test_alias_uses_test_published_pointer(self):
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+        response = self.handler.lambda_handler(event("test.example.com"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
@@ -342,7 +342,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertTrue(any(key.startswith("test-prefix/") for key in self.loaded_keys))
 
     def test_production_alias_uses_production_pointer(self):
-        response = self.handler.lambda_handler(event("pamelabetancourt.com"), Context())
+        response = self.handler.lambda_handler(event("example.com"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
@@ -353,22 +353,22 @@ class RuntimeHandlerTest(unittest.TestCase):
 
     def test_canonical_domain_environment_query_uses_test_pointer(self):
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
-        self.assertEqual(body["domain"], "pamelabetancourt.com")
+        self.assertEqual(body["domain"], "example.com")
         self.assertEqual(body["environment"], "test")
         self.assertEqual(body["versionId"], "test-v1")
-        self.assertEqual(body["metadata"]["requestedDomain"], "pamelabetancourt.com")
+        self.assertEqual(body["metadata"]["requestedDomain"], "example.com")
         self.assertIsNone(body["metadata"]["resolvedAlias"])
         self.assertTrue(any(key.startswith("test-prefix/") for key in self.loaded_keys))
 
     def test_canonical_domain_environment_query_maps_dev_to_test(self):
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", domain="pamelabetancourt.com", environment="dev"),
+            event("api.zoolandingpage.com.mx", domain="example.com", environment="dev"),
             Context(),
         )
         body = parse(response)
@@ -380,14 +380,14 @@ class RuntimeHandlerTest(unittest.TestCase):
 
     def test_runtime_payload_loader_rejects_every_server_descriptor_path_before_s3(self):
         path_templates = (
-            "pamelabetancourt.com/server/{name}",
-            "pamelabetancourt.com/SERVER/{name}",
-            "pamelabetancourt.com/%73erver/{name}",
-            "pamelabetancourt.com/%2573erver/{name}",
-            "pamelabetancourt.com/public/../server/{name}",
-            "pamelabetancourt.com/public/%2e%2e/%73erver/{name}",
-            "pamelabetancourt.com\\server\\{name}",
-            "pamelabetancourt.com/server/{name}?download=1",
+            "example.com/server/{name}",
+            "example.com/SERVER/{name}",
+            "example.com/%73erver/{name}",
+            "example.com/%2573erver/{name}",
+            "example.com/public/../server/{name}",
+            "example.com/public/%2e%2e/%73erver/{name}",
+            "example.com\\server\\{name}",
+            "example.com/server/{name}?download=1",
         )
 
         for descriptor_name in SERVER_DESCRIPTOR_FILES:
@@ -405,7 +405,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "name": "query-page-id",
                 "route_path": "/admin",
                 "page_id": "server",
-                "request": event("api.zoolandingpage.com.mx", path="/admin", domain="pamelabetancourt.com", environment="test"),
+                "request": event("api.zoolandingpage.com.mx", path="/admin", domain="example.com", environment="test"),
             },
             {
                 "name": "encoded-page-id-and-query-path",
@@ -414,7 +414,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "request": event(
                     "api.zoolandingpage.com.mx",
                     path="/server%2Fintegrations.json",
-                    domain="pamelabetancourt.com",
+                    domain="example.com",
                     environment="test",
                 ),
             },
@@ -424,7 +424,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "page_id": "%2573erver/private-customer-marker",
                 "request": {
                     "headers": {"host": "api.zoolandingpage.com.mx"},
-                    "queryStringParameters": {"domain": "pamelabetancourt.com", "environment": "test", "lang": "es"},
+                    "queryStringParameters": {"domain": "example.com", "environment": "test", "lang": "es"},
                     "rawPath": "/raw-admin",
                     "requestContext": {"http": {"path": "/raw-admin"}},
                 },
@@ -436,7 +436,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "request": event(
                     "api.zoolandingpage.com.mx",
                     path="/public/../server/commerce.json",
-                    domain="pamelabetancourt.com",
+                    domain="example.com",
                     environment="test",
                 ),
             },
@@ -444,7 +444,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "name": "backslash-page-id",
                 "route_path": "/backslash",
                 "page_id": "public\\server\\private-customer-marker",
-                "request": event("api.zoolandingpage.com.mx", path="/backslash", domain="pamelabetancourt.com", environment="test"),
+                "request": event("api.zoolandingpage.com.mx", path="/backslash", domain="example.com", environment="test"),
             },
             {
                 "name": "lang-traversal",
@@ -454,7 +454,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                     "api.zoolandingpage.com.mx",
                     path="/",
                     lang="%252e%252e%252f%2573erver%252fintegrations",
-                    domain="pamelabetancourt.com",
+                    domain="example.com",
                     environment="test",
                 ),
             },
@@ -464,7 +464,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             with self.subTest(case=case["name"]):
                 self.loaded_keys.clear()
                 self.metadata["routes"] = [{"path": case["route_path"], "pageId": case["page_id"]}]
-                site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+                site_config = self.payloads["test-prefix/example.com/site-config.json"]
                 site_config["routes"] = [{"path": case["route_path"], "pageId": case["page_id"]}]
                 output = io.StringIO()
                 with redirect_stdout(output):
@@ -507,7 +507,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             with self.subTest(environment=environment_variant):
                 self.loaded_keys.clear()
                 response = self.handler.lambda_handler(
-                    event("api.zoolandingpage.com.mx", domain="pamelabetancourt.com", environment=environment_variant),
+                    event("api.zoolandingpage.com.mx", domain="example.com", environment=environment_variant),
                     Context(),
                 )
                 self.assertEqual(response["statusCode"], 200)
@@ -553,10 +553,10 @@ class RuntimeHandlerTest(unittest.TestCase):
         with redirect_stdout(output):
             items = self.handler._query_content_hub_metadata("main", "ARTICLE#", "test")
             bundle = self.handler._load_content_hub_json_bundle(
-                "content-hubs/test/main/published/pamelabetancourt.com/es/article-1/revision-1/bundle.json",
+                "content-hubs/test/main/published/example.com/es/article-1/revision-1/bundle.json",
                 "test",
                 "main",
-                "pamelabetancourt.com",
+                "example.com",
                 "es",
                 "article-1",
             )
@@ -569,12 +569,12 @@ class RuntimeHandlerTest(unittest.TestCase):
 
     def test_parameterized_category_route_resolves_page_payload(self):
         self.metadata["routes"].append({"path": "/blog/:categorySlug", "pageId": "blog-category"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-category", "Category page")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-category", "Category page")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug", "pageId": "blog-category"})
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -613,7 +613,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                         "api.zoolandingpage.com.mx",
                         path=path,
                         lang=conflicting_language,
-                        domain="pamelabetancourt.com",
+                        domain="example.com",
                         environment="test",
                     ),
                     Context(),
@@ -632,7 +632,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 self.assertFalse(any(key.endswith(f"/i18n/{conflicting_language}.json") for key in request_keys))
 
     def test_language_free_routes_keep_request_then_site_default_precedence(self):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {
                 "defaultLanguage": "es",
@@ -644,7 +644,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             event(
                 "api.zoolandingpage.com.mx",
                 lang="en",
-                domain="pamelabetancourt.com",
+                domain="example.com",
                 environment="test",
             ),
             Context(),
@@ -653,7 +653,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             event(
                 "api.zoolandingpage.com.mx",
                 lang=None,
-                domain="pamelabetancourt.com",
+                domain="example.com",
                 environment="test",
             ),
             Context(),
@@ -663,7 +663,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(parse(default_response)["lang"], "es")
 
     def test_unpublished_future_metadata_route_does_not_break_published_home(self):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {
                 "defaultLanguage": "es",
@@ -685,7 +685,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             event(
                 "api.zoolandingpage.com.mx",
                 lang=None,
-                domain="pamelabetancourt.com",
+                domain="example.com",
                 environment="test",
             ),
             Context(),
@@ -702,7 +702,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertFalse(any("/future/" in key or "/future-detail/" in key for key in self.loaded_keys))
 
     def test_unpublished_future_metadata_paths_do_not_resolve_before_pointer_publish(self):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {
                 "defaultLanguage": "es",
@@ -727,7 +727,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                         "api.zoolandingpage.com.mx",
                         path=path,
                         lang="es",
-                        domain="pamelabetancourt.com",
+                        domain="example.com",
                         environment="test",
                     ),
                     Context(),
@@ -745,7 +745,7 @@ class RuntimeHandlerTest(unittest.TestCase):
 
     def test_unpublished_future_metadata_content_hub_is_not_exposed_or_resolved(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["runtime"] = {
             "contentHubs": [{
                 "hubId": "main",
@@ -773,7 +773,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             event(
                 "api.zoolandingpage.com.mx",
                 lang="es",
-                domain="pamelabetancourt.com",
+                domain="example.com",
                 environment="test",
             ),
             Context(),
@@ -796,7 +796,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertNotIn("future-hub", response["body"])
 
     def test_unpublished_future_metadata_default_does_not_drive_legacy_published_home(self):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config.pop("defaultPageId")
         site_config["routes"] = [
             route
@@ -820,7 +820,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             event(
                 "api.zoolandingpage.com.mx",
                 lang="es",
-                domain="pamelabetancourt.com",
+                domain="example.com",
                 environment="test",
             ),
             Context(),
@@ -835,7 +835,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertFalse(any("/future-default/" in key for key in self.loaded_keys))
 
     def test_legacy_and_matching_pointer_metadata_keep_derived_fallbacks(self):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config.pop("defaultPageId")
         site_config.pop("contentHubs")
         site_config["routes"] = [
@@ -848,9 +848,9 @@ class RuntimeHandlerTest(unittest.TestCase):
             "hubId": "metadata-hub",
             "name": "Metadata hub",
             "defaultLanguage": "es",
-            "canonicalDraftDomain": "pamelabetancourt.com",
+            "canonicalDraftDomain": "example.com",
         }]
-        self.put_page("test-prefix", "pamelabetancourt.com", "metadata-default", "Metadata default")
+        self.put_page("test-prefix", "example.com", "metadata-default", "Metadata default")
 
         for mode, draft_pointer in (
             ("legacy", None),
@@ -866,7 +866,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                     event(
                         "api.zoolandingpage.com.mx",
                         lang="es",
-                        domain="pamelabetancourt.com",
+                        domain="example.com",
                         environment="test",
                     ),
                     Context(),
@@ -885,8 +885,8 @@ class RuntimeHandlerTest(unittest.TestCase):
             "path": "/soft-landing-china/:locale",
             "pageId": "legacy-parameter-shell",
         })
-        self.put_page("test-prefix", "pamelabetancourt.com", "legacy-parameter-shell", "Legacy shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "legacy-parameter-shell", "Legacy shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {"defaultLanguage": "es", "supportedLanguages": ["es", "en", "zh"]}
         }
@@ -895,14 +895,14 @@ class RuntimeHandlerTest(unittest.TestCase):
             "pageId": "soft-landing-china",
             "language": "en",
         })
-        self.put_page("test-prefix", "pamelabetancourt.com", "soft-landing-china", "China campaign")
+        self.put_page("test-prefix", "example.com", "soft-landing-china", "China campaign")
 
         response = self.handler.lambda_handler(
             event(
                 "api.zoolandingpage.com.mx",
                 path="/soft-landing-china/eng",
                 lang="zh",
-                domain="pamelabetancourt.com",
+                domain="example.com",
                 environment="test",
             ),
             Context(),
@@ -927,7 +927,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "api.zoolandingpage.com.mx",
                 path="/soft-landing-china/eng",
                 lang="zh",
-                domain="pamelabetancourt.com",
+                domain="example.com",
                 environment="test",
             ),
             Context(),
@@ -947,7 +947,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "api.zoolandingpage.com.mx",
                 path="/missing",
                 lang="zh",
-                domain="pamelabetancourt.com",
+                domain="example.com",
                 environment="test",
             ),
             Context(),
@@ -971,7 +971,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             {"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"},
             {"path": "/blog/:categorySlug", "pageId": "blog-category"},
         ])
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].extend([
             {"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"},
             {"path": "/blog/:categorySlug", "pageId": "blog-category"},
@@ -987,8 +987,8 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "publicTaxonomy": [],
             }]
         }
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-category", "Category shell")
+        self.put_page("test-prefix", "example.com", "blog-article", "Article shell")
+        self.put_page("test-prefix", "example.com", "blog-category", "Category shell")
 
         for path in ("/blog/web/missing-article", "/blog/missing-category"):
             with self.subTest(path=path):
@@ -999,7 +999,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                         "api.zoolandingpage.com.mx",
                         path=path,
                         lang="zh",
-                        domain="pamelabetancourt.com",
+                        domain="example.com",
                         environment="test",
                     ),
                     Context(),
@@ -1017,7 +1017,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 self.assertEqual(len(self.content_hub_queries) - queries_before, 2)
 
     def test_language_free_route_preserves_legacy_default_locale_filename_behavior(self):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
 
         for configured_default, expected_runtime_language in (
             ("pt-BR", "pt-br"),
@@ -1032,13 +1032,13 @@ class RuntimeHandlerTest(unittest.TestCase):
                 }
                 self.put_payload(
                     "test-prefix",
-                    "pamelabetancourt.com",
+                    "example.com",
                     f"i18n/{expected_runtime_language}.json",
                     {"lang": expected_runtime_language, "dictionary": {"shared": "Compartilhado"}},
                 )
                 self.put_payload(
                     "test-prefix",
-                    "pamelabetancourt.com",
+                    "example.com",
                     f"default/i18n/{expected_runtime_language}.json",
                     {"pageId": "default", "lang": expected_runtime_language, "dictionary": {"title": "Início"}},
                 )
@@ -1048,7 +1048,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                     event(
                         "api.zoolandingpage.com.mx",
                         lang=None,
-                        domain="pamelabetancourt.com",
+                        domain="example.com",
                         environment="test",
                     ),
                     Context(),
@@ -1062,7 +1062,7 @@ class RuntimeHandlerTest(unittest.TestCase):
 
     def test_fixed_route_language_requires_trimmed_nonempty_string_page_id(self):
         invalid_page_ids = (None, "", " ", " campaign ", 7, ["campaign"])
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {"defaultLanguage": "es", "supportedLanguages": ["es", "en"]}
         }
@@ -1090,7 +1090,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                             event(
                                 "api.zoolandingpage.com.mx",
                                 lang="zh",
-                                domain="pamelabetancourt.com",
+                                domain="example.com",
                                 environment="test",
                             ),
                             Context(),
@@ -1101,7 +1101,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                     self.assertFalse(any("/i18n/" in key for key in self.loaded_keys))
 
     def test_inactive_lifecycle_validates_route_languages_before_fallback(self):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {"defaultLanguage": "es", "supportedLanguages": ["es", "en"]}
         }
@@ -1132,7 +1132,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                             event(
                                 "api.zoolandingpage.com.mx",
                                 path="/campaign",
-                                domain="pamelabetancourt.com",
+                                domain="example.com",
                                 environment="test",
                             ),
                             Context(),
@@ -1145,7 +1145,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                     self.assertFalse(any("/i18n/" in key for key in self.loaded_keys))
                     self.assertEqual(
                         self.loaded_keys,
-                        ["test-prefix/pamelabetancourt.com/site-config.json"],
+                        ["test-prefix/example.com/site-config.json"],
                     )
 
     def test_invalid_route_languages_fail_closed_before_localized_payload_reads(self):
@@ -1199,7 +1199,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                     )
 
     def test_duplicate_page_language_pairs_fail_closed_in_each_route_source(self):
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
             "i18n": {"defaultLanguage": "es", "supportedLanguages": ["es", "en", "zh"]}
         }
@@ -1225,7 +1225,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 response = self.handler.lambda_handler(
                     event(
                         "api.zoolandingpage.com.mx",
-                        domain="pamelabetancourt.com",
+                        domain="example.com",
                         environment="test",
                     ),
                     Context(),
@@ -1236,7 +1236,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 self.assertFalse(any("/i18n/" in key for key in self.loaded_keys))
 
     def test_runtime_bundle_exposes_public_content_hub_metadata(self):
-        response = self.handler.lambda_handler(event("pamelabetancourt.com"), Context())
+        response = self.handler.lambda_handler(event("example.com"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
@@ -1257,9 +1257,9 @@ class RuntimeHandlerTest(unittest.TestCase):
                 ("Open Sans", "open-sans-600", "600"),
             )
         ]
-        self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]["site"] = {"fonts": fonts}
+        self.payloads["test-prefix/example.com/site-config.json"]["site"] = {"fonts": fonts}
 
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+        response = self.handler.lambda_handler(event("test.example.com"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
@@ -1268,7 +1268,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertFalse(any(key.endswith(".woff2") for key in self.loaded_keys))
 
     def test_runtime_bundle_preserves_exact_required_auth_origin_without_private_fields(self):
-        site = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site = self.payloads["test-prefix/example.com/site-config.json"]
         site["runtime"] = {
             "authRemote": {
                 "enabled": True,
@@ -1279,7 +1279,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             }
         }
 
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+        response = self.handler.lambda_handler(event("test.example.com"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
@@ -1456,7 +1456,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.metadata["routes"][0]["serverOnly"] = {"credentialRef": "must-not-render"}
         self.metadata["lifecycle"]["serverPolicy"] = {"token": "must-not-render"}
 
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+        response = self.handler.lambda_handler(event("test.example.com"), Context())
         body = parse(response)
         serialized = json.dumps(body)
 
@@ -1467,7 +1467,7 @@ class RuntimeHandlerTest(unittest.TestCase):
 
     def test_ordinary_route_does_not_attempt_content_hub_article_bundle_lookup(self):
         with patch.object(self.handler, "_content_hub_bundle_for_path", return_value=None) as lookup:
-            response = self.handler.lambda_handler(event("test.pamelabetancourt.com"), Context())
+            response = self.handler.lambda_handler(event("test.example.com"), Context())
 
         self.assertEqual(response["statusCode"], 200)
         lookup.assert_not_called()
@@ -1517,8 +1517,8 @@ class RuntimeHandlerTest(unittest.TestCase):
     def test_runtime_bundle_hydrates_public_content_hub_indexes_from_metadata_table(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article page")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article page")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -1608,7 +1608,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         ]
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -1641,9 +1641,9 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(current_article["interactions"]["forms"], {"enabled": False, "moderation": "queue"})
         self.assertNotIn("bodyHash", serialized)
         seo = body["pageConfig"]["seo"]
-        self.assertEqual(seo["title"], "QA E2E | pamelabetancourt.com")
+        self.assertEqual(seo["title"], "QA E2E | example.com")
         self.assertEqual(seo["description"], "Resumen publico")
-        self.assertEqual(seo["canonical"], "https://pamelabetancourt.com/blog/web/qa-e2e")
+        self.assertEqual(seo["canonical"], "https://example.com/blog/web/qa-e2e")
         self.assertEqual(seo["robots"], {"default": "index,follow"})
         categories = body["variables"]["variables"]["contentHub"]["categories"]["items"]
         tags = body["variables"]["variables"]["contentHub"]["tags"]["items"]
@@ -1653,8 +1653,8 @@ class RuntimeHandlerTest(unittest.TestCase):
     def test_dynamic_content_hub_article_uses_safe_static_cover_fallback(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
         self.metadata["routes"].append({"path": "/blog", "pageId": "blog"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog", "Blog")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog", "Blog")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["runtime"] = {
             "contentHubs": [
                 {
@@ -1696,7 +1696,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         ]
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -1716,8 +1716,8 @@ class RuntimeHandlerTest(unittest.TestCase):
     def test_runtime_bundle_hydrates_localized_public_content_hub_article(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article page")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article page")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -1766,7 +1766,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         ]
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/english-article", lang="en", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/english-article", lang="en", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -1791,8 +1791,8 @@ class RuntimeHandlerTest(unittest.TestCase):
     def test_runtime_bundle_repairs_mojibake_from_published_site_config_articles(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article page")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article page")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -1819,7 +1819,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         }
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/mojibake", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/mojibake", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -1833,8 +1833,8 @@ class RuntimeHandlerTest(unittest.TestCase):
     def test_runtime_bundle_treats_missing_article_visibility_as_public(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article page")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article page")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -1866,7 +1866,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         ]
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/sin-visibility", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/sin-visibility", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -1881,8 +1881,8 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -1896,7 +1896,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 }
             ]
         }
-        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json"
+        bundle_key = "content-hubs/test/main/published/example.com/es/art_public/rev_1/bundle.json"
         self.content_hub_items = [
             {
                 "tableName": "content-hub-metadata-test",
@@ -1935,7 +1935,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         }
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -1948,17 +1948,17 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["variables"]["variables"]["contentHub"]["currentArticle"]["articleId"], "art_public")
         self.assertEqual(body["variables"]["variables"]["articleBody"]["html"], "<p>Cuerpo real publicado</p>")
         self.assertEqual(body["i18n"]["dictionary"]["article.body"], "Cuerpo real publicado")
-        self.assertEqual(body["pageConfig"]["seo"]["title"], "SEO desde bundle | pamelabetancourt.com")
+        self.assertEqual(body["pageConfig"]["seo"]["title"], "SEO desde bundle | example.com")
         self.assertEqual(body["pageConfig"]["seo"]["description"], "Descripcion desde bundle")
-        self.assertEqual(body["pageConfig"]["seo"]["canonical"], "https://pamelabetancourt.com/blog/web/qa-e2e")
+        self.assertEqual(body["pageConfig"]["seo"]["canonical"], "https://example.com/blog/web/qa-e2e")
         self.assertNotIn("publishedBundleKey", serialized)
 
     def test_missing_lang_uses_site_default_language_for_content_hub_article_bundle(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {"i18n": {"defaultLanguage": "es"}}
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
@@ -1973,7 +1973,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 }
             ]
         }
-        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json"
+        bundle_key = "content-hubs/test/main/published/example.com/es/art_public/rev_1/bundle.json"
         self.content_hub_items = [
             {
                 "tableName": "content-hub-metadata-test",
@@ -2003,7 +2003,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         }
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", lang=None, domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", lang=None, domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -2019,8 +2019,8 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {"i18n": {"defaultLanguage": "es"}}
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
@@ -2035,7 +2035,7 @@ class RuntimeHandlerTest(unittest.TestCase):
                 }
             ]
         }
-        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json"
+        bundle_key = "content-hubs/test/main/published/example.com/es/art_public/rev_1/bundle.json"
         self.content_hub_items = [
             {
                 "tableName": "content-hub-metadata-test",
@@ -2059,7 +2059,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         }
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", lang="en", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", lang="en", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -2074,8 +2074,8 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -2089,9 +2089,9 @@ class RuntimeHandlerTest(unittest.TestCase):
                 }
             ]
         }
-        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json"
-        self.items[("SLUG#test#pamelabetancourt.com#es", "PATH#/blog/web/qa-e2e")] = {
-            "pk": "SLUG#test#pamelabetancourt.com#es",
+        bundle_key = "content-hubs/test/main/published/example.com/es/art_public/rev_1/bundle.json"
+        self.items[("SLUG#test#example.com#es", "PATH#/blog/web/qa-e2e")] = {
+            "pk": "SLUG#test#example.com#es",
             "sk": "PATH#/blog/web/qa-e2e",
             "articleId": "art_public",
             "revisionId": "rev_1",
@@ -2126,7 +2126,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         }
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -2143,9 +2143,9 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         article_path = "/blog/web/qa-e2e"
-        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json"
+        bundle_key = "content-hubs/test/main/published/example.com/es/art_public/rev_1/bundle.json"
         site_config = {
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "runtime": {
                 "contentHubs": [{
                     "hubId": "main",
@@ -2165,7 +2165,7 @@ class RuntimeHandlerTest(unittest.TestCase):
             "primaryLocale": "es",
             "path": article_path,
         }]
-        self.items[("SLUG#test#pamelabetancourt.com#es", f"PATH#{article_path}")] = {
+        self.items[("SLUG#test#example.com#es", f"PATH#{article_path}")] = {
             "articleId": "art_public",
             "path": article_path,
             "publishedBundleKey": bundle_key,
@@ -2186,8 +2186,8 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -2201,9 +2201,9 @@ class RuntimeHandlerTest(unittest.TestCase):
                 }
             ]
         }
-        bundle_key = "content-hubs/test/main/published/pamelabetancourt.com/es/other_article/rev_1/bundle.json"
-        self.items[("SLUG#test#pamelabetancourt.com#es", "PATH#/blog/web/qa-e2e")] = {
-            "pk": "SLUG#test#pamelabetancourt.com#es",
+        bundle_key = "content-hubs/test/main/published/example.com/es/other_article/rev_1/bundle.json"
+        self.items[("SLUG#test#example.com#es", "PATH#/blog/web/qa-e2e")] = {
+            "pk": "SLUG#test#example.com#es",
             "sk": "PATH#/blog/web/qa-e2e",
             "articleId": "other_article",
             "revisionId": "rev_1",
@@ -2232,7 +2232,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         }
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -2245,8 +2245,8 @@ class RuntimeHandlerTest(unittest.TestCase):
     def test_missing_content_hub_article_path_renders_configured_404(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -2262,7 +2262,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         }
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/no-existe", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/no-existe", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -2279,9 +2279,9 @@ class RuntimeHandlerTest(unittest.TestCase):
             {"path": "/blog/:categorySlug", "pageId": "blog-category"},
             {"path": "/blog/tag/:tagSlug", "pageId": "blog-tag"},
         ])
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-category", "Category shell")
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-tag", "Tag shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-category", "Category shell")
+        self.put_page("test-prefix", "example.com", "blog-tag", "Tag shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].extend([
             {"path": "/blog/:categorySlug", "pageId": "blog-category"},
             {"path": "/blog/tag/:tagSlug", "pageId": "blog-tag"},
@@ -2301,11 +2301,11 @@ class RuntimeHandlerTest(unittest.TestCase):
         }
 
         category_response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/bienvenido-al-blog-de-zoosite", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/bienvenido-al-blog-de-zoosite", domain="example.com", environment="test"),
             Context(),
         )
         tag_response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/tag/no-existe", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/tag/no-existe", domain="example.com", environment="test"),
             Context(),
         )
         category_body = parse(category_response)
@@ -2326,8 +2326,8 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -2353,12 +2353,12 @@ class RuntimeHandlerTest(unittest.TestCase):
                 "title": "QA E2E",
                 "path": "/blog/web/qa-e2e",
                 "publishedAt": "2026-06-27T22:48:09Z",
-                "publishedBundleKey": "content-hubs/test/main/published/pamelabetancourt.com/es/art_public/rev_1/bundle.json",
+                "publishedBundleKey": "content-hubs/test/main/published/example.com/es/art_public/rev_1/bundle.json",
             }
         ]
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -2386,8 +2386,8 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
         self.handler.CONTENT_HUB_PACKAGES_BUCKET_NAME_TEST = "content-hub-packages-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article shell")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article shell")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -2425,7 +2425,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         }
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/qa-e2e", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -2439,7 +2439,7 @@ class RuntimeHandlerTest(unittest.TestCase):
     def test_runtime_bundle_uses_environment_specific_content_hub_table(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata-prod"
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME_TEST = "content-hub-metadata-test"
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["runtime"] = {
             "contentHubs": [
                 {
@@ -2479,7 +2479,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         ]
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -2495,8 +2495,8 @@ class RuntimeHandlerTest(unittest.TestCase):
     def test_runtime_bundle_reads_all_paginated_content_hub_metadata(self):
         self.handler.CONTENT_HUB_METADATA_TABLE_NAME = "content-hub-metadata-test"
         self.metadata["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
-        self.put_page("test-prefix", "pamelabetancourt.com", "blog-article", "Article page")
-        site_config = self.payloads["test-prefix/pamelabetancourt.com/site-config.json"]
+        self.put_page("test-prefix", "example.com", "blog-article", "Article page")
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["routes"].append({"path": "/blog/:categorySlug/:articleSlug", "pageId": "blog-article"})
         site_config["runtime"] = {
             "contentHubs": [
@@ -2526,7 +2526,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         ]
 
         response = self.handler.lambda_handler(
-            event("api.zoolandingpage.com.mx", path="/blog/web/article-200", domain="pamelabetancourt.com", environment="test"),
+            event("api.zoolandingpage.com.mx", path="/blog/web/article-200", domain="example.com", environment="test"),
             Context(),
         )
         body = parse(response)
@@ -2581,25 +2581,25 @@ class RuntimeHandlerTest(unittest.TestCase):
         )
 
     def test_unknown_route_uses_configured_not_found_page_id(self):
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())
+        response = self.handler.lambda_handler(event("test.example.com", "/missing", "en"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
-        self.assertEqual(body["domain"], "pamelabetancourt.com")
+        self.assertEqual(body["domain"], "example.com")
         self.assertEqual(body["pageId"], "not-found")
         self.assertEqual(body["route"]["path"], "/404")
         self.assertEqual(body["metadata"]["resolvedPath"], "/missing")
         self.assertEqual(body["metadata"]["statusCode"], 404)
         self.assertTrue(body["metadata"]["notFound"])
         self.assertEqual(body["i18n"]["lang"], "en")
-        self.assertIn("test-prefix/pamelabetancourt.com/not-found/page-config.json", self.loaded_keys)
+        self.assertIn("test-prefix/example.com/not-found/page-config.json", self.loaded_keys)
 
     def test_unknown_route_uses_404_route_when_not_found_page_id_is_omitted(self):
         self.metadata.pop("notFoundPageId", None)
         for prefix in ("prod-prefix", "test-prefix"):
-            self.payloads[f"{prefix}/pamelabetancourt.com/site-config.json"].pop("notFoundPageId", None)
+            self.payloads[f"{prefix}/example.com/site-config.json"].pop("notFoundPageId", None)
 
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing"), Context())
+        response = self.handler.lambda_handler(event("test.example.com", "/missing"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
@@ -2608,7 +2608,7 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["metadata"]["statusCode"], 404)
 
     def test_unknown_route_does_not_fall_back_to_default_page_id(self):
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing"), Context())
+        response = self.handler.lambda_handler(event("test.example.com", "/missing"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
@@ -2618,9 +2618,9 @@ class RuntimeHandlerTest(unittest.TestCase):
     def test_unknown_route_falls_back_to_canonical_404_when_draft_has_no_404(self):
         self.metadata["routes"] = [{"path": "/", "pageId": "default"}]
         for prefix in ("prod-prefix", "test-prefix"):
-            self.put_site(prefix, "pamelabetancourt.com", include_not_found=False)
+            self.put_site(prefix, "example.com", include_not_found=False)
 
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())
+        response = self.handler.lambda_handler(event("test.example.com", "/missing", "en"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
@@ -2628,8 +2628,8 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(body["environment"], "test")
         self.assertEqual(body["versionId"], "canonical-test-v1")
         self.assertEqual(body["pageId"], "not-found")
-        self.assertEqual(body["metadata"]["requestedDomain"], "test.pamelabetancourt.com")
-        self.assertEqual(body["metadata"]["fallbackFromDomain"], "pamelabetancourt.com")
+        self.assertEqual(body["metadata"]["requestedDomain"], "test.example.com")
+        self.assertEqual(body["metadata"]["fallbackFromDomain"], "example.com")
         self.assertEqual(body["metadata"]["statusCode"], 404)
 
     def test_missing_domain_uses_canonical_404(self):
@@ -2659,7 +2659,7 @@ class RuntimeHandlerTest(unittest.TestCase):
 
     def test_test_alias_falls_back_to_canonical_404_if_no_test_pointer_exists(self):
         self.metadata["publishedEnvironments"].pop("test")
-        response = self.handler.lambda_handler(event("test.pamelabetancourt.com", "/missing", "en"), Context())
+        response = self.handler.lambda_handler(event("test.example.com", "/missing", "en"), Context())
         body = parse(response)
 
         self.assertEqual(response["statusCode"], 200)
