@@ -1,6 +1,9 @@
 import datetime
 import copy
+import base64
+import hashlib
 import importlib.util
+import io
 from pathlib import Path
 import re
 import unittest
@@ -9,6 +12,104 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 class NativeReleaseReviewTests(unittest.TestCase):
+    def test_stable_test_rollback_can_be_read_but_unsafe_states_cannot(self):
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("runtime_rollback_guard", ROOT / "tools/native_runtime_release.py")
+        op = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(op)
+        role = "arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-test-cfn-exec"
+        names = ("ConfigRuntimeReadFunction", "ConfigRuntimeReadFunctionAliaslive",
+                 "ConfigRuntimeReadFunctionRole", "ConfigRuntimeReadFunctionRuntimeBundleGetPermissionProd",
+                 "ConfigRuntimeReadFunctionVersion375dd3b296", "RuntimeApi",
+                 "RuntimeApiDeploymentda724c766a", "RuntimeApiProdStage")
+        resources = [{"LogicalResourceId": name, "PhysicalResourceId": name,
+                      "ResourceType": "AWS::Lambda::Function" if name == names[0] else "AWS::CloudFormation::CustomResource",
+                      "ResourceStatus": "CREATE_COMPLETE" if "Version" in name or "Deployment" in name else "UPDATE_COMPLETE"}
+                     for name in names]
+        stack = {"StackId": "arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-config-runtime-read-test/654d8f60-6d02-11f1-aa08-0e6c5445b1d9",
+                 "StackStatus": "UPDATE_ROLLBACK_COMPLETE", "RoleARN": role, "Parameters": [], "Outputs": []}
+
+        def read(*args):
+            if args[:2] == ("sts", "get-caller-identity"): return {"Account": "765932874577"}
+            if args[:2] == ("cloudformation", "describe-stacks"): return {"Stacks": [stack]}
+            if args[:2] == ("cloudformation", "list-stack-resources"): return {"StackResourceSummaries": resources}
+            if args[:2] == ("cloudformation", "list-change-sets"): return {"Summaries": []}
+            if args[:2] == ("lambda", "get-function-configuration"): return {"FunctionName": names[0]}
+            if args[:2] == ("cloudformation", "get-template"): return {"TemplateBody": {"Resources": {}}}
+            raise AssertionError(args)
+
+        with patch.dict("os.environ", {"AWS_REGION": "us-east-1"}), patch.object(op, "aws", side_effect=read):
+            snapshot = op.baseline(op.PROFILES["test"])
+        self.assertEqual(snapshot["stackId"], stack["StackId"])
+        self.assertEqual(len(snapshot["identities"]), 8)
+        self.assertEqual(snapshot["stackStatus"], "UPDATE_ROLLBACK_COMPLETE")
+
+        invalid = (
+            ("status", "UPDATE_ROLLBACK_IN_PROGRESS"),
+            ("status", "UPDATE_ROLLBACK_FAILED"),
+            ("role", "arn:aws:iam::765932874577:role/another-role"),
+            ("resources", resources[:-1]),
+            ("resource_status", "UPDATE_FAILED"),
+            ("changes", [{"Status": "CREATE_COMPLETE", "ExecutionStatus": "AVAILABLE"}]),
+        )
+        for mutation, value in invalid:
+            with self.subTest(mutation=mutation):
+                current_stack = copy.deepcopy(stack)
+                current_resources = copy.deepcopy(resources)
+                changes = []
+                if mutation == "status": current_stack["StackStatus"] = value
+                if mutation == "role": current_stack["RoleARN"] = value
+                if mutation == "resources": current_resources = value
+                if mutation == "resource_status": current_resources[0]["ResourceStatus"] = value
+                if mutation == "changes": changes = value
+
+                def unsafe(*args):
+                    if args[:2] == ("cloudformation", "describe-stacks"): return {"Stacks": [current_stack]}
+                    if args[:2] == ("cloudformation", "list-stack-resources"): return {"StackResourceSummaries": current_resources}
+                    if args[:2] == ("cloudformation", "list-change-sets"): return {"Summaries": changes}
+                    return read(*args)
+
+                with patch.dict("os.environ", {"AWS_REGION": "us-east-1"}), patch.object(op, "aws", side_effect=unsafe), self.assertRaises(ValueError):
+                    op.baseline(op.PROFILES["test"])
+        with patch.dict("os.environ", {"AWS_REGION": "us-east-1"}), patch.object(op, "aws", side_effect=read), self.assertRaises(ValueError):
+            op.baseline(op.PROFILES["production"])
+
+    def test_live_test_zip_accepts_only_complete_test_rollback(self):
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("runtime_rollback_zip", ROOT / "tools/native_runtime_release.py")
+        op = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(op)
+        package = b"same-retained-zip"
+        function = "zoolanding-config-runtime-ConfigRuntimeReadFunctio-h2B86UU86X18"
+        role = "arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-test-cfn-exec"
+        names = ("ConfigRuntimeReadFunction", "ConfigRuntimeReadFunctionAliaslive",
+                 "ConfigRuntimeReadFunctionRole", "ConfigRuntimeReadFunctionRuntimeBundleGetPermissionProd",
+                 "ConfigRuntimeReadFunctionVersion375dd3b296", "RuntimeApi",
+                 "RuntimeApiDeploymentda724c766a", "RuntimeApiProdStage")
+        resources = [{"LogicalResourceId": name, "PhysicalResourceId": function if name == names[0] else name,
+                      "ResourceType": "AWS::Lambda::Function" if name == names[0] else "AWS::CloudFormation::CustomResource",
+                      "ResourceStatus": "CREATE_COMPLETE" if "Version" in name or "Deployment" in name else "UPDATE_COMPLETE"}
+                     for name in names]
+        stack = {"StackId": "arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-config-runtime-read-test/654d8f60-6d02-11f1-aa08-0e6c5445b1d9",
+                 "StackStatus": "UPDATE_ROLLBACK_COMPLETE", "RoleARN": role}
+
+        def read(*args):
+            if args[:2] == ("cloudformation", "describe-stacks"): return {"Stacks": [stack]}
+            if args[:2] == ("cloudformation", "list-stack-resources"): return {"StackResourceSummaries": resources}
+            if args[:2] == ("cloudformation", "list-change-sets"): return {"Summaries": []}
+            if args[:2] == ("cloudformation", "describe-stack-resource"): return {"StackResourceDetail": {"PhysicalResourceId": function}}
+            if args[:2] == ("lambda", "get-alias"): return {"FunctionVersion": "4", "RevisionId": "same"}
+            if args[:2] == ("lambda", "get-function"):
+                return {"Configuration": {"State": "Active", "LastUpdateStatus": "Successful",
+                                          "CodeSha256": base64.b64encode(hashlib.sha256(package).digest()).decode(),
+                                          "RevisionId": "same"},
+                        "Code": {"Location": "https://awslambda-us-east-1-tasks.s3.us-east-1.amazonaws.com/same"}}
+            raise AssertionError(args)
+
+        with patch.object(op, "aws", side_effect=read), patch.object(op, "urlopen", return_value=io.BytesIO(package)):
+            result = op.live_test_zip(package)
+        self.assertEqual(result["version"], "4")
+
     def test_source_built_release_preserves_live_api_metadata_at_native_guard(self):
         builder_spec = importlib.util.spec_from_file_location("runtime_builder", ROOT / "tools/build_lambda_artifact.py")
         builder = importlib.util.module_from_spec(builder_spec)
