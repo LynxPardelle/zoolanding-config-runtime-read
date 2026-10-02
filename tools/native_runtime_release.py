@@ -374,6 +374,29 @@ def require_versioned_bucket(profile):
     if state.get("Status")!="Enabled":_reject()
 
 
+def require_stable_stack(profile, stack, resources=None):
+    status = stack.get("StackStatus")
+    if status in {"CREATE_COMPLETE", "UPDATE_COMPLETE"}: return
+    if profile["stack"] != PROFILES["test"]["stack"] or status != "UPDATE_ROLLBACK_COMPLETE": _reject()
+    if (stack.get("RoleARN") != "arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-test-cfn-exec"
+        or not re.fullmatch(r"arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-config-runtime-read-test/[a-zA-Z0-9-]+", str(stack.get("StackId", "")))): _reject()
+    if resources is None:
+        resources = aws("cloudformation", "list-stack-resources", "--stack-name", profile["stack"])["StackResourceSummaries"]
+    if not isinstance(resources, list) or len(resources) != 8: _reject()
+    logical = [item.get("LogicalResourceId") for item in resources if isinstance(item, dict)]
+    fixed = {"ConfigRuntimeReadFunction", "ConfigRuntimeReadFunctionAliaslive",
+             "ConfigRuntimeReadFunctionRole", "ConfigRuntimeReadFunctionRuntimeBundleGetPermissionProd",
+             "RuntimeApi", "RuntimeApiProdStage"}
+    if (len(logical) != 8 or len(set(logical)) != 8 or not fixed.issubset(logical)
+        or len([item for item in logical if re.fullmatch(r"ConfigRuntimeReadFunctionVersion[a-zA-Z0-9]+", str(item))]) != 1
+        or len([item for item in logical if re.fullmatch(r"RuntimeApiDeployment[a-zA-Z0-9]+", str(item))]) != 1
+        or any(item.get("ResourceStatus") not in {"CREATE_COMPLETE", "UPDATE_COMPLETE"}
+               or not isinstance(item.get("PhysicalResourceId"), str) or not item["PhysicalResourceId"]
+               for item in resources)): _reject()
+    changes = aws("cloudformation", "list-change-sets", "--stack-name", profile["stack"])
+    if not isinstance(changes, dict) or changes.get("Summaries") != []: _reject()
+
+
 def lambda_task_url(location):
     """Only regional Lambda-owned task buckets; signed coordinates stay in memory."""
     if not isinstance(location, str) or any(ord(char) < 32 for char in location): _reject()
@@ -390,7 +413,8 @@ def lambda_task_url(location):
 
 def live_test_zip(expected):
     stack=aws("cloudformation","describe-stacks","--stack-name",PROFILES["test"]["stack"])["Stacks"]
-    if len(stack)!=1 or stack[0].get("StackStatus") not in {"CREATE_COMPLETE","UPDATE_COMPLETE"}:_reject()
+    if len(stack)!=1:_reject()
+    require_stable_stack(PROFILES["test"], stack[0])
     mapping=aws("cloudformation","describe-stack-resource","--stack-name",PROFILES["test"]["stack"],"--logical-resource-id","ConfigRuntimeReadFunction")["StackResourceDetail"]
     function=mapping["PhysicalResourceId"]
     alias=aws("lambda","get-alias","--function-name",function,"--name","live")
@@ -444,16 +468,17 @@ def same_managed_patch_configuration(left,right,management):
 def baseline(profile):
     if os.getenv("AWS_REGION")!="us-east-1" or aws("sts","get-caller-identity").get("Account")!="765932874577":_reject()
     stacks=aws("cloudformation","describe-stacks","--stack-name",profile["stack"])["Stacks"]
-    if len(stacks)!=1 or stacks[0].get("StackStatus") not in {"CREATE_COMPLETE","UPDATE_COMPLETE"}:_reject()
+    if len(stacks)!=1:_reject()
     stack=stacks[0]
     if profile["stack"]==PROFILES["production"]["stack"] and stack.get("RoleARN")!="arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-production-cfn-exec":_reject()
     resources=aws("cloudformation","list-stack-resources","--stack-name",profile["stack"])["StackResourceSummaries"]
+    require_stable_stack(profile, stack, resources)
     identities=sorted([{key:item.get(key) for key in ("LogicalResourceId","PhysicalResourceId","ResourceType")} for item in resources],key=lambda item:item["LogicalResourceId"])
     functions=[aws("lambda","get-function-configuration","--function-name",item["PhysicalResourceId"]) for item in identities if item["ResourceType"]=="AWS::Lambda::Function"]
     authority={}
     if profile["stack"]==PROFILES["production"]["stack"]:
         authority={"sourceAuthority":source_authority(os.environ),"permissionAuthority":permission_authority(os.environ.get("GITHUB_REPOSITORY"),aws)}
-    result={**authority,"cloudFormationRoleArn":stack.get("RoleARN"),"stackId":stack["StackId"],"parameters":sorted(stack.get("Parameters",[]),key=lambda item:item["ParameterKey"]),
+    result={**authority,"cloudFormationRoleArn":stack.get("RoleARN"),"stackStatus":stack["StackStatus"],"stackId":stack["StackId"],"parameters":sorted(stack.get("Parameters",[]),key=lambda item:item["ParameterKey"]),
         "outputs":sorted(stack.get("Outputs",[]),key=lambda item:item["OutputKey"]),"identities":identities,"functions":functions,
         "original":aws("cloudformation","get-template","--stack-name",profile["stack"],"--template-stage","Original")["TemplateBody"],
         "processed":aws("cloudformation","get-template","--stack-name",profile["stack"],"--template-stage","Processed")["TemplateBody"]}
