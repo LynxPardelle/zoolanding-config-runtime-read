@@ -305,7 +305,9 @@ legacy production dispatch fails before credentials. It consumes the exact TEST
 `runtime-read.zip` bytes and verifies both members against the selected source.
 It also compares the live TEST alias ZIP before and after activation. Production
 keeps its existing function/API topology; TEST-only version/alias template fields
-are projected away without rebuilding the ZIP. Only production Lambda code can
+and `AWS::LanguageExtensions` are projected away without rebuilding the ZIP.
+The operator rejects an unknown transform, alias shape or nested macro before
+uploading the ZIP or creating a change set. Only production Lambda code can
 change. TEST may update its retained version and `live` alias. IAM, API, storage,
 parameters, environment configuration and replacements are rejected.
 
