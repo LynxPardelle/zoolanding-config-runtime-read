@@ -30,6 +30,43 @@ def _template(value):
     return value
 
 
+def production_candidate_source(text):
+    """Invert only the TEST packaging grammar before any production write."""
+    transform = (
+        "Transform:\n"
+        "- AWS::LanguageExtensions\n"
+        "- AWS::Serverless-2016-10-31\n"
+        "Description:"
+    )
+    function = (
+        "  ConfigRuntimeReadFunction:\n"
+        "    Type: AWS::Serverless::Function\n"
+        "    Properties:\n"
+        "      CodeUri: runtime-read.zip\n"
+        "      AutoPublishAlias: live\n"
+        "      AutoPublishAliasAllProperties: true\n"
+        "      VersionDeletionPolicy: Retain\n"
+    )
+    if (not isinstance(text, str) or "\r" in text
+        or not text.startswith("AWSTemplateFormatVersion: '2010-09-09'\n" + transform)
+        or text.count(transform) != 1
+        or len(re.findall(r"(?m)^\s*Transform\s*:", text)) != 1
+        or text.count("AWS::LanguageExtensions") != 1
+        or text.count("AWS::Serverless-2016-10-31") != 1
+        or text.count(function) != 1
+        or text.count("CodeUri: runtime-read.zip") != 1
+        or any(text.count(name) != 1 for name in (
+            "AutoPublishAlias:", "AutoPublishAliasAllProperties:", "VersionDeletionPolicy:"))
+        or any(name in text for name in (
+            "Fn::ForEach", "Fn::Length", "Fn::ToJsonString", "Fn::Transform"))): _reject()
+    return (text.replace(transform, "Transform: AWS::Serverless-2016-10-31\nDescription:", 1)
+                .replace(function, (
+                    "  ConfigRuntimeReadFunction:\n"
+                    "    Type: AWS::Serverless::Function\n"
+                    "    Properties:\n"
+                    "      CodeUri: runtime-read.zip\n"), 1))
+
+
 def native_template(value):
     value = _template(value)
     if "Transform" in value or "Globals" in value: _reject()
@@ -483,6 +520,7 @@ def main():
     code_sha=base64.b64encode(bytes.fromhex(zip_digest)).decode()
     if (args.release_root/"lambda-code-sha256.txt").read_bytes()!=(code_sha+"\n").encode():_reject()
     text=(args.release_root/"template.yaml").read_text(encoding="utf-8")
+    production_text=production_candidate_source(text) if args.environment=="production" else None
     snapshot=release_snapshot(profile, package, text)
     identical = args.environment == "test" and snapshot["testReleaseBinding"]["identicalPackage"]
     if args.environment == "test":
@@ -509,9 +547,7 @@ def main():
             if args.environment=="production":
                 # Preserve the existing production API/function topology. TEST's
                 # immutable alias remains TEST-only; the ZIP bytes are unchanged.
-                for line in ("      AutoPublishAlias: live\n","      AutoPublishAliasAllProperties: true\n","      VersionDeletionPolicy: Retain\n"):
-                    if text.count(line)!=1:_reject()
-                    text=text.replace(line,"")
+                text=production_text
             uri="      CodeUri:\n"+"".join(f"        {k}: {json.dumps(v)}\n" for k,v in (("Bucket",profile["bucket"]),("Key",key),("Version",version)))
             candidate=tmp/"candidate.yaml"
             if args.environment == "test":
