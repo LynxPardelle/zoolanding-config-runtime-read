@@ -56,15 +56,19 @@ def decision(aws_call, role, action, resource, context=None):
     return results[0].get("EvalDecision")
 
 
-def verify_role_access(aws_call, source_sha, zip_sha256, version_id):
+def verify_role_access(aws_call, source_sha, zip_sha256, version_id, stack_arn):
     if (not re.fullmatch(r"[a-f0-9]{40}", source_sha)
         or not re.fullmatch(r"[a-f0-9]{64}", zip_sha256)
         or not isinstance(version_id, str) or not version_id or version_id == "null"
-        or any(ord(char) < 33 or ord(char) > 126 for char in version_id)): reject("coordinates")
+        or any(ord(char) < 33 or ord(char) > 126 for char in version_id)
+        or not re.fullmatch(
+            r"arn:aws:cloudformation:us-east-1:765932874577:stack/"
+            r"zoolanding-config-runtime-read-test/[a-zA-Z0-9-]+", str(stack_arn))): reject("coordinates")
     key = f"{source_sha}/{zip_sha256}.zip"
     target = PREFIX + key
     outside = f"arn:aws:s3:::{BUCKET}/system/thn-runtime/outside-releases/{source_sha}/{zip_sha256}.zip"
     tests = (
+        (ROLES[0], "cloudformation:ListChangeSets", stack_arn, None, "allowed"),
         (ROLES[0], "s3:GetObject", target, None, "allowed"),
         (ROLES[0], "s3:PutObject", target, {"s3:x-amz-server-side-encryption": "AES256"}, "allowed"),
         (ROLES[0], "s3:GetObjectVersion", target, {"s3:VersionId": version_id}, "allowed"),
@@ -151,7 +155,7 @@ def main():
     release.code_pointer_candidate(snapshot["processed"], projected, parameters)
     key = f"system/thn-runtime/releases/{args.source_sha}/{args.zip_sha256}.zip"
     version = existing_object_version(key, package)
-    verify_role_access(aws, args.source_sha, args.zip_sha256, version)
+    verify_role_access(aws, args.source_sha, args.zip_sha256, version, snapshot["stackId"])
     print(json.dumps({"result": "runtime_test_preflight_passed", "sourceSha": args.source_sha,
                       "zipSha256": args.zip_sha256, "stackStatus": snapshot["stackStatus"],
                       "objectExists": version != "preflight-unwritten-version"}, separators=(",", ":")))
