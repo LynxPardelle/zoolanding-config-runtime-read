@@ -3,6 +3,7 @@ import copy
 import base64
 import hashlib
 import importlib.util
+import inspect
 import io
 from pathlib import Path
 import re
@@ -12,6 +13,41 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 class NativeReleaseReviewTests(unittest.TestCase):
+    def test_rollback_snapshot_accepts_only_its_reviewed_change_set(self):
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("runtime_owned_preview", ROOT / "tools/native_runtime_release.py")
+        op = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(op)
+        self.assertIn("expected_change_set_arn", inspect.signature(op.require_stable_stack).parameters)
+        stack_id = ("arn:aws:cloudformation:us-east-1:765932874577:stack/"
+                    "zoolanding-config-runtime-read-test/654d8f60-6d02-11f1-aa08-0e6c5445b1d9")
+        change = ("arn:aws:cloudformation:us-east-1:765932874577:changeSet/"
+                  "thn-runtime-37081251335-1/18af46a4-c001-448c-b64d-4f46b8361341")
+        stack = {"StackId": stack_id, "StackStatus": "UPDATE_ROLLBACK_COMPLETE",
+                 "RoleARN": "arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-test-cfn-exec"}
+        names = ("ConfigRuntimeReadFunction", "ConfigRuntimeReadFunctionAliaslive",
+                 "ConfigRuntimeReadFunctionRole", "ConfigRuntimeReadFunctionRuntimeBundleGetPermissionProd",
+                 "ConfigRuntimeReadFunctionVersion375dd3b296", "RuntimeApi",
+                 "RuntimeApiDeploymentda724c766a", "RuntimeApiProdStage")
+        resources = [{"LogicalResourceId": name, "PhysicalResourceId": name,
+                      "ResourceStatus": "UPDATE_COMPLETE"} for name in names]
+        owned = {"StackId": stack_id, "StackName": "zoolanding-config-runtime-read-test",
+                 "ChangeSetId": change, "ChangeSetName": "thn-runtime-37081251335-1",
+                 "Status": "CREATE_COMPLETE", "ExecutionStatus": "AVAILABLE"}
+        for summaries, allowed in (([owned], True), ([], False),
+                                   ([owned, dict(owned, ChangeSetId=change + "-other")], False),
+                                   ([dict(owned, Status="FAILED")], False),
+                                   ([dict(owned, StackId=stack_id + "-other")], False)):
+            with self.subTest(summaries=summaries):
+                with patch.object(op, "aws", return_value={"Summaries": summaries}):
+                    if allowed:
+                        op.require_stable_stack(op.PROFILES["test"], stack, resources,
+                                                expected_change_set_arn=change)
+                    else:
+                        with self.assertRaises(ValueError):
+                            op.require_stable_stack(op.PROFILES["test"], stack, resources,
+                                                    expected_change_set_arn=change)
+
     def test_stable_test_rollback_can_be_read_but_unsafe_states_cannot(self):
         from unittest.mock import patch
         spec = importlib.util.spec_from_file_location("runtime_rollback_guard", ROOT / "tools/native_runtime_release.py")
