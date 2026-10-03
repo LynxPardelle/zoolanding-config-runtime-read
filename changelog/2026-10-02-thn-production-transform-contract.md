@@ -1,0 +1,7 @@
+# THN production Runtime Read transform correction
+
+The protected TEST artifact contains `AWS::LanguageExtensions` and the SAM transform to publish the retained `live` alias. The production stack's Original template contains only the SAM transform, and its CloudFormation role has no grant for LanguageExtensions. The production operator previously removed the alias properties but left the extra transform in its candidate.
+
+The operator now checks the fixed TEST packaging shape before any S3 or CloudFormation write. Only the production candidate loses LanguageExtensions and the three alias properties; the sealed TEST template and Lambda ZIP are unchanged. Unknown transforms, changed alias lines, and LanguageExtensions-only or nested macros fail closed.
+
+Offline tests cover the conversion, rejected variants and pre-write rejection. A read-only AWS CLI refresh on 2026-10-02 found the production stack in `UPDATE_COMPLETE`, with six resources and no pending change set. The new candidate parses identically to its current Original template except for `ConfigRuntimeReadFunction.CodeUri`; a projection with pinned SAM CLI `1.163.0` and translator `1.111.0`, using current parameters, exactly matches all six processed resources when the current code pointer is supplied. The stack's termination protection was already disabled; this correction does not change it. Production review and execution remain pending separate authorization.

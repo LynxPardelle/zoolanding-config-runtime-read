@@ -30,6 +30,43 @@ def _template(value):
     return value
 
 
+def production_candidate_source(text):
+    """Invert only the TEST packaging grammar before any production write."""
+    transform = (
+        "Transform:\n"
+        "- AWS::LanguageExtensions\n"
+        "- AWS::Serverless-2016-10-31\n"
+        "Description:"
+    )
+    function = (
+        "  ConfigRuntimeReadFunction:\n"
+        "    Type: AWS::Serverless::Function\n"
+        "    Properties:\n"
+        "      CodeUri: runtime-read.zip\n"
+        "      AutoPublishAlias: live\n"
+        "      AutoPublishAliasAllProperties: true\n"
+        "      VersionDeletionPolicy: Retain\n"
+    )
+    if (not isinstance(text, str) or "\r" in text
+        or not text.startswith("AWSTemplateFormatVersion: '2010-09-09'\n" + transform)
+        or text.count(transform) != 1
+        or len(re.findall(r"(?m)^\s*Transform\s*:", text)) != 1
+        or text.count("AWS::LanguageExtensions") != 1
+        or text.count("AWS::Serverless-2016-10-31") != 1
+        or text.count(function) != 1
+        or text.count("CodeUri: runtime-read.zip") != 1
+        or any(text.count(name) != 1 for name in (
+            "AutoPublishAlias:", "AutoPublishAliasAllProperties:", "VersionDeletionPolicy:"))
+        or any(name in text for name in (
+            "Fn::ForEach", "Fn::Length", "Fn::ToJsonString", "Fn::Transform"))): _reject()
+    return (text.replace(transform, "Transform: AWS::Serverless-2016-10-31\nDescription:", 1)
+                .replace(function, (
+                    "  ConfigRuntimeReadFunction:\n"
+                    "    Type: AWS::Serverless::Function\n"
+                    "    Properties:\n"
+                    "      CodeUri: runtime-read.zip\n"), 1))
+
+
 def native_template(value):
     value = _template(value)
     if "Transform" in value or "Globals" in value: _reject()
@@ -337,6 +374,39 @@ def require_versioned_bucket(profile):
     if state.get("Status")!="Enabled":_reject()
 
 
+def require_stable_stack(profile, stack, resources=None, expected_change_set_arn=None):
+    status = stack.get("StackStatus")
+    if status in {"CREATE_COMPLETE", "UPDATE_COMPLETE"}: return
+    if profile["stack"] != PROFILES["test"]["stack"] or status != "UPDATE_ROLLBACK_COMPLETE": _reject()
+    if (stack.get("RoleARN") != "arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-test-cfn-exec"
+        or not re.fullmatch(r"arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-config-runtime-read-test/[a-zA-Z0-9-]+", str(stack.get("StackId", "")))): _reject()
+    if resources is None:
+        resources = aws("cloudformation", "list-stack-resources", "--stack-name", profile["stack"])["StackResourceSummaries"]
+    if not isinstance(resources, list) or len(resources) != 8: _reject()
+    logical = [item.get("LogicalResourceId") for item in resources if isinstance(item, dict)]
+    fixed = {"ConfigRuntimeReadFunction", "ConfigRuntimeReadFunctionAliaslive",
+             "ConfigRuntimeReadFunctionRole", "ConfigRuntimeReadFunctionRuntimeBundleGetPermissionProd",
+             "RuntimeApi", "RuntimeApiProdStage"}
+    if (len(logical) != 8 or len(set(logical)) != 8 or not fixed.issubset(logical)
+        or len([item for item in logical if re.fullmatch(r"ConfigRuntimeReadFunctionVersion[a-zA-Z0-9]+", str(item))]) != 1
+        or len([item for item in logical if re.fullmatch(r"RuntimeApiDeployment[a-zA-Z0-9]+", str(item))]) != 1
+        or any(item.get("ResourceStatus") not in {"CREATE_COMPLETE", "UPDATE_COMPLETE"}
+               or not isinstance(item.get("PhysicalResourceId"), str) or not item["PhysicalResourceId"]
+               for item in resources)): _reject()
+    changes = aws("cloudformation", "list-change-sets", "--stack-name", profile["stack"])
+    if not isinstance(changes, dict) or changes.get("NextToken") or not isinstance(changes.get("Summaries"), list): _reject()
+    if expected_change_set_arn is None:
+        if changes["Summaries"] != []: _reject()
+    else:
+        if (not re.fullmatch(r"arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-runtime-[1-9][0-9]*-[1-9][0-9]*/[a-f0-9-]+", expected_change_set_arn)
+            or len(changes["Summaries"]) != 1): _reject()
+        owned = changes["Summaries"][0]
+        if (not isinstance(owned, dict) or owned.get("ChangeSetId") != expected_change_set_arn
+            or owned.get("StackId") != stack["StackId"] or owned.get("StackName") != profile["stack"]
+            or owned.get("Status") != "CREATE_COMPLETE" or owned.get("ExecutionStatus") != "AVAILABLE"
+            or not re.fullmatch(r"thn-runtime-[1-9][0-9]*-[1-9][0-9]*", str(owned.get("ChangeSetName", "")))): _reject()
+
+
 def lambda_task_url(location):
     """Only regional Lambda-owned task buckets; signed coordinates stay in memory."""
     if not isinstance(location, str) or any(ord(char) < 32 for char in location): _reject()
@@ -353,7 +423,8 @@ def lambda_task_url(location):
 
 def live_test_zip(expected):
     stack=aws("cloudformation","describe-stacks","--stack-name",PROFILES["test"]["stack"])["Stacks"]
-    if len(stack)!=1 or stack[0].get("StackStatus") not in {"CREATE_COMPLETE","UPDATE_COMPLETE"}:_reject()
+    if len(stack)!=1:_reject()
+    require_stable_stack(PROFILES["test"], stack[0])
     mapping=aws("cloudformation","describe-stack-resource","--stack-name",PROFILES["test"]["stack"],"--logical-resource-id","ConfigRuntimeReadFunction")["StackResourceDetail"]
     function=mapping["PhysicalResourceId"]
     alias=aws("lambda","get-alias","--function-name",function,"--name","live")
@@ -404,19 +475,20 @@ def same_managed_patch_configuration(left,right,management):
     return normalized[0]==normalized[1]
 
 
-def baseline(profile):
+def baseline(profile, expected_change_set_arn=None):
     if os.getenv("AWS_REGION")!="us-east-1" or aws("sts","get-caller-identity").get("Account")!="765932874577":_reject()
     stacks=aws("cloudformation","describe-stacks","--stack-name",profile["stack"])["Stacks"]
-    if len(stacks)!=1 or stacks[0].get("StackStatus") not in {"CREATE_COMPLETE","UPDATE_COMPLETE"}:_reject()
+    if len(stacks)!=1:_reject()
     stack=stacks[0]
     if profile["stack"]==PROFILES["production"]["stack"] and stack.get("RoleARN")!="arn:aws:iam::765932874577:role/zoolanding-config-runtime-read-production-cfn-exec":_reject()
     resources=aws("cloudformation","list-stack-resources","--stack-name",profile["stack"])["StackResourceSummaries"]
+    require_stable_stack(profile, stack, resources, expected_change_set_arn)
     identities=sorted([{key:item.get(key) for key in ("LogicalResourceId","PhysicalResourceId","ResourceType")} for item in resources],key=lambda item:item["LogicalResourceId"])
     functions=[aws("lambda","get-function-configuration","--function-name",item["PhysicalResourceId"]) for item in identities if item["ResourceType"]=="AWS::Lambda::Function"]
     authority={}
     if profile["stack"]==PROFILES["production"]["stack"]:
         authority={"sourceAuthority":source_authority(os.environ),"permissionAuthority":permission_authority(os.environ.get("GITHUB_REPOSITORY"),aws)}
-    result={**authority,"cloudFormationRoleArn":stack.get("RoleARN"),"stackId":stack["StackId"],"parameters":sorted(stack.get("Parameters",[]),key=lambda item:item["ParameterKey"]),
+    result={**authority,"cloudFormationRoleArn":stack.get("RoleARN"),"stackStatus":stack["StackStatus"],"stackId":stack["StackId"],"parameters":sorted(stack.get("Parameters",[]),key=lambda item:item["ParameterKey"]),
         "outputs":sorted(stack.get("Outputs",[]),key=lambda item:item["OutputKey"]),"identities":identities,"functions":functions,
         "original":aws("cloudformation","get-template","--stack-name",profile["stack"],"--template-stage","Original")["TemplateBody"],
         "processed":aws("cloudformation","get-template","--stack-name",profile["stack"],"--template-stage","Processed")["TemplateBody"]}
@@ -426,8 +498,8 @@ def baseline(profile):
     return result
 
 
-def release_snapshot(profile, package, candidate_text=None):
-    snapshot = baseline(profile)
+def release_snapshot(profile, package, candidate_text=None, expected_change_set_arn=None):
+    snapshot = baseline(profile) if expected_change_set_arn is None else baseline(profile, expected_change_set_arn)
     if profile == PROFILES["test"]:
         if len(snapshot["functions"]) != 1: _reject()
         snapshot["runtimeManagement"] = runtime_management(snapshot["functions"][0], snapshot["processed"])
@@ -483,7 +555,9 @@ def main():
     code_sha=base64.b64encode(bytes.fromhex(zip_digest)).decode()
     if (args.release_root/"lambda-code-sha256.txt").read_bytes()!=(code_sha+"\n").encode():_reject()
     text=(args.release_root/"template.yaml").read_text(encoding="utf-8")
-    snapshot=release_snapshot(profile, package, text)
+    production_text=production_candidate_source(text) if args.environment=="production" else None
+    snapshot=release_snapshot(profile, package, text,
+        expected_change_set_arn=args.review_change_set_arn if args.execution=="execute" else None)
     identical = args.environment == "test" and snapshot["testReleaseBinding"]["identicalPackage"]
     if args.environment == "test":
         # Validate the complete promoted source before any package or preview write.
@@ -509,9 +583,7 @@ def main():
             if args.environment=="production":
                 # Preserve the existing production API/function topology. TEST's
                 # immutable alias remains TEST-only; the ZIP bytes are unchanged.
-                for line in ("      AutoPublishAlias: live\n","      AutoPublishAliasAllProperties: true\n","      VersionDeletionPolicy: Retain\n"):
-                    if text.count(line)!=1:_reject()
-                    text=text.replace(line,"")
+                text=production_text
             uri="      CodeUri:\n"+"".join(f"        {k}: {json.dumps(v)}\n" for k,v in (("Bucket",profile["bucket"]),("Key",key),("Version",version)))
             candidate=tmp/"candidate.yaml"
             if args.environment == "test":
@@ -554,12 +626,12 @@ def main():
         aws("s3api","get-object","--bucket",code["S3Bucket"],"--expected-bucket-owner","765932874577","--key",code["S3Key"],"--version-id",code["S3ObjectVersion"],str(tmp/"reviewed.zip"))
         if (tmp/"reviewed.zip").read_bytes()!=package:_reject()
         digest=preview_digest(snapshot,description,original,processed,args.source_sha,args.manifest_digest,zip_digest)
-        fresh=release_snapshot(profile, package, text)
+        fresh=release_snapshot(profile, package, text, expected_change_set_arn=change)
         if fresh!=snapshot:_reject()
         if args.execution=="execute":
             if digest!=args.review_digest:_reject()
             review_window(description)
-            immediate=release_snapshot(profile, package, text)
+            immediate=release_snapshot(profile, package, text, expected_change_set_arn=change)
             if immediate!=snapshot:_reject()
             aws("cloudformation","execute-change-set","--stack-name",profile["stack"],"--change-set-name",change)
             wait=subprocess.run(["aws","cloudformation","wait","stack-update-complete","--stack-name",profile["stack"]],capture_output=True)

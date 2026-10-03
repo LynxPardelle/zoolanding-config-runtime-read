@@ -64,6 +64,142 @@ def changes():
         "Details": [{"Target": {"Attribute": "Properties", "Name": "Code", "RequiresRecreation": "Never"}}]}}]
 
 
+class ProductionTransformCandidateTests(unittest.TestCase):
+    @staticmethod
+    def sealed_source():
+        return (
+            "AWSTemplateFormatVersion: '2010-09-09'\n"
+            "Transform:\n"
+            "- AWS::LanguageExtensions\n"
+            "- AWS::Serverless-2016-10-31\n"
+            "Description: retained runtime\n"
+            "Resources:\n"
+            "  ConfigRuntimeReadFunction:\n"
+            "    Type: AWS::Serverless::Function\n"
+            "    Properties:\n"
+            "      CodeUri: runtime-read.zip\n"
+            "      AutoPublishAlias: live\n"
+            "      AutoPublishAliasAllProperties: true\n"
+            "      VersionDeletionPolicy: Retain\n"
+            "      Handler: lambda_function.lambda_handler\n"
+        )
+
+    def test_production_conversion_removes_only_test_transform_and_alias(self):
+        op = operator()
+        convert = getattr(op, "production_candidate_source", None)
+        self.assertTrue(callable(convert), "production has no guarded transform conversion")
+        source = self.sealed_source()
+        expected = (
+            "AWSTemplateFormatVersion: '2010-09-09'\n"
+            "Transform: AWS::Serverless-2016-10-31\n"
+            "Description: retained runtime\n"
+            "Resources:\n"
+            "  ConfigRuntimeReadFunction:\n"
+            "    Type: AWS::Serverless::Function\n"
+            "    Properties:\n"
+            "      CodeUri: runtime-read.zip\n"
+            "      Handler: lambda_function.lambda_handler\n"
+        )
+        self.assertEqual(convert(source), expected)
+        self.assertEqual(source, self.sealed_source(), "sealed TEST source changed")
+
+    def test_production_conversion_rejects_unknown_transform_alias_and_macros(self):
+        op = operator()
+        convert = getattr(op, "production_candidate_source", None)
+        self.assertTrue(callable(convert))
+        source = self.sealed_source()
+        changes = {
+            "extra-transform": ("- AWS::Serverless-2016-10-31\n", "- AWS::Serverless-2016-10-31\n- Custom\n"),
+            "duplicate-transform": ("Description: retained runtime\n", "Transform: Custom\nDescription: retained runtime\n"),
+            "wrong-alias": ("AutoPublishAlias: live", "AutoPublishAlias: prod"),
+            "duplicate-alias": ("      AutoPublishAlias: live\n", "      AutoPublishAlias: live\n      AutoPublishAlias: live\n"),
+            "missing-version-policy": ("      VersionDeletionPolicy: Retain\n", ""),
+            "nested-macro": ("Description: retained runtime\n", "Description: retained runtime\nFn::Transform: external\n"),
+            "foreach": ("Description: retained runtime\n", "Description: retained runtime\nFn::ForEach::Loop: []\n"),
+            "length": ("Description: retained runtime\n", "Description: retained runtime\nFn::Length: []\n"),
+            "json-string": ("Description: retained runtime\n", "Description: retained runtime\nFn::ToJsonString: {}\n"),
+        }
+        for name, (old, new) in changes.items():
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                convert(source.replace(old, new))
+
+    def test_production_rejects_bad_transform_before_release_snapshot_or_storage(self):
+        op = operator()
+        package = b"sealed package fixture"
+        invalid = self.sealed_source().replace(
+            "- AWS::Serverless-2016-10-31\n",
+            "- AWS::Serverless-2016-10-31\n- Custom\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "runtime-read.zip").write_bytes(package)
+            (root / "lambda-code-sha256.txt").write_bytes(
+                (base64.b64encode(hashlib.sha256(package).digest()).decode() + "\n").encode("ascii")
+            )
+            (root / "template.yaml").write_text(invalid, encoding="utf-8")
+            argv = ["operator", "--environment=production", "--execution=review",
+                    "--release-root=" + str(root), "--source-sha=" + SOURCE,
+                    "--manifest-digest=" + ZIP_DIGEST]
+            with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main"}), \
+                 patch("sys.argv", argv), patch.object(op, "release_snapshot") as snapshot, \
+                 patch.object(op, "aws") as aws:
+                with self.assertRaises(ValueError):
+                    op.main()
+                snapshot.assert_not_called()
+                aws.assert_not_called()
+
+    def test_production_review_builds_single_transform_candidate_at_write_barrier(self):
+        op = operator()
+        package = b"sealed package fixture"
+        digest = hashlib.sha256(package).hexdigest()
+        source = self.sealed_source()
+        captured = []
+
+        class WriteBarrier(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "runtime-read.zip").write_bytes(package)
+            (root / "lambda-code-sha256.txt").write_bytes(
+                (base64.b64encode(hashlib.sha256(package).digest()).decode() + "\n").encode("ascii")
+            )
+            (root / "template.yaml").write_text(source, encoding="utf-8")
+
+            def aws(*args):
+                if args[:2] == ("s3api", "head-object"):
+                    return {"VersionId": "sealed-version"}
+                if args[:2] == ("s3api", "get-object"):
+                    Path(args[-1]).write_bytes(package)
+                    return {}
+                if args[:2] == ("cloudformation", "create-change-set"):
+                    captured.append(Path(args[args.index("--template-body") + 1][7:]).read_text(encoding="utf-8"))
+                    raise WriteBarrier()
+                raise AssertionError(args)
+
+            argv = ["operator", "--environment=production", "--execution=review",
+                    "--release-root=" + str(root), "--source-sha=" + SOURCE,
+                    "--manifest-digest=" + ZIP_DIGEST]
+            env = {"GITHUB_REF": "refs/heads/main", "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1",
+                   "AWS_CLOUDFORMATION_ROLE_ARN": "retained-role"}
+            with patch.dict(os.environ, env), patch("sys.argv", argv), \
+                 patch.object(op, "release_snapshot", return_value={"parameters": []}), \
+                 patch.object(op, "require_versioned_bucket"), patch.object(op, "aws", side_effect=aws), \
+                 patch.object(op.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                with self.assertRaises(WriteBarrier):
+                    op.main()
+
+        self.assertEqual(len(captured), 1)
+        expected_uri = (
+            "      CodeUri:\n"
+            "        Bucket: \"zoolanding-config-payloads\"\n"
+            f"        Key: \"system/thn-runtime/releases/{SOURCE}/{digest}.zip\"\n"
+            "        Version: \"sealed-version\"\n"
+        )
+        expected = op.production_candidate_source(source).replace("      CodeUri: runtime-read.zip\n", expected_uri)
+        self.assertEqual(captured[0], expected)
+
+
 class IdenticalCandidateTests(unittest.TestCase):
     def test_identical_candidate_preserves_entire_version_alias_and_template(self):
         op = operator()
