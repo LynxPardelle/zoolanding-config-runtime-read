@@ -527,6 +527,13 @@ def _effective_route_language(
         route_language = _normalize_locale(route.get("language"))
         if route_language:
             return route_language
+    requested = _normalize_locale(requested_language)
+    supported = _supported_site_languages(site_config)
+    if requested in supported:
+        return requested
+    base_language = requested.split("-")[0]
+    if base_language in supported:
+        return base_language
     return requested_language or _site_default_language(site_config) or "en"
 
 

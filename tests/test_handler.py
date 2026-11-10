@@ -662,6 +662,28 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(parse(explicit_response)["lang"], "en")
         self.assertEqual(parse(default_response)["lang"], "es")
 
+    def test_regional_language_uses_the_published_base_translation(self):
+        site_config = self.payloads["test-prefix/example.com/site-config.json"]
+        site_config["site"] = {"i18n": {
+            "defaultLanguage": "en", "supportedLanguages": ["es", "en"],
+        }}
+        response = self.handler.lambda_handler(
+            event("api.zoolandingpage.com.mx", lang="es-419",
+                  domain="example.com", environment="test"), Context(),
+        )
+        body = parse(response)
+        self.assertEqual(body["lang"], "es")
+        self.assertEqual(body["i18n"]["lang"], "es")
+        self.assertEqual(body["i18n"]["dictionary"]["shared"], "Compartido")
+        self.assertFalse(any("/i18n/es-419.json" in key for key in self.loaded_keys))
+
+    def test_published_regional_language_keeps_its_own_translation(self):
+        config = {"site": {"i18n": {
+            "defaultLanguage": "es", "supportedLanguages": ["es", "es-419"],
+        }}}
+        self.assertEqual(self.handler._effective_route_language({}, "es-419", config), "es-419")
+        self.assertEqual(self.handler._effective_route_language({"language": "es"}, "es-419", config), "es")
+
     def test_unpublished_future_metadata_route_does_not_break_published_home(self):
         site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
