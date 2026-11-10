@@ -530,7 +530,7 @@ def _effective_route_language(
     requested = _normalize_locale(requested_language)
     supported = _supported_site_languages(site_config)
     if requested in supported:
-        return requested
+        return requested_language
     base_language = requested.split("-")[0]
     if base_language in supported:
         return base_language

@@ -684,6 +684,12 @@ class RuntimeHandlerTest(unittest.TestCase):
         self.assertEqual(self.handler._effective_route_language({}, "es-419", config), "es-419")
         self.assertEqual(self.handler._effective_route_language({"language": "es"}, "es-419", config), "es")
 
+    def test_exact_regional_match_preserves_existing_filename_casing(self):
+        config = {"site": {"i18n": {
+            "defaultLanguage": "pt-br", "supportedLanguages": ["pt-BR"],
+        }}}
+        self.assertEqual(self.handler._effective_route_language({}, "pt-br", config), "pt-br")
+
     def test_unpublished_future_metadata_route_does_not_break_published_home(self):
         site_config = self.payloads["test-prefix/example.com/site-config.json"]
         site_config["site"] = {
