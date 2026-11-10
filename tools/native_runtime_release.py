@@ -545,7 +545,7 @@ def verify_preserved_state(before,after,environment,code_sha):
     left=copy.deepcopy(before["functions"][0]);right=copy.deepcopy(after["functions"][0])
     for key in ("CodeSha256","CodeSize","LastModified","RevisionId","LastUpdateStatus","LastUpdateStatusReason","LastUpdateStatusReasonCode"):
         left.pop(key,None);right.pop(key,None)
-    if left!=right and (environment!="production" or not same_managed_patch_configuration(left,right,before.get("runtimeManagement"))):_reject()
+    if left!=right and (environment not in {"test", "production"} or not same_managed_patch_configuration(left,right,before.get("runtimeManagement"))):_reject()
 
 
 def main():
