@@ -24,6 +24,15 @@ PROFILES={"test":{"stack":"zoolanding-config-runtime-read-test","bucket":"zoolan
 def _reject(): raise ValueError("native_runtime_release_rejected")
 
 
+def public_review_receipt(digest, description):
+    arn = description.get("ChangeSetId") if isinstance(description, dict) else None
+    if (not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)
+        or not isinstance(arn, str) or not re.fullmatch(
+            r"arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-runtime-[1-9][0-9]*-[1-9][0-9]*/[a-f0-9-]+", arn)):
+        _reject()
+    return {"review_inventory_digest": digest, "review_change_set_arn": arn}
+
+
 def _template(value):
     if isinstance(value,str): value=json.loads(value)
     if not isinstance(value,dict) or not isinstance(value.get("Resources"),dict):_reject()
@@ -642,10 +651,12 @@ def main():
             if identical: verify_neutral_state(snapshot, after, code)
             if args.environment=="production" and live_test_zip(package)!=snapshot["testBinding"]:_reject()
         else:
+            receipt = public_review_receipt(digest, description)
             with open(os.environ["GITHUB_STEP_SUMMARY"],"a",encoding="utf-8") as summary:
                 summary.write(f"review_inventory_digest={digest}\nreview_change_set_arn={change}\n")
                 for entry in description["Changes"]:
                     resource=entry["ResourceChange"];summary.write(f"- {resource['Action']} {resource['LogicalResourceId']} {resource['ResourceType']} replacement={resource.get('Replacement')}\n")
+            print(json.dumps(receipt, sort_keys=True))
         print("native_runtime_release_verified")
 
 
