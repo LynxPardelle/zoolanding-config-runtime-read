@@ -298,7 +298,14 @@ class ManagedProductionRuntimeTests(unittest.TestCase):
                           ("RuntimeVersionConfig",{"RuntimeVersionArn":"arn:aws:lambda:us-east-1::runtime:"+"2"*64,"Error":{"ErrorCode":"InvalidRuntime"}})):
             changed=copy.deepcopy(after);changed["functions"][0][key]=value
             with self.subTest(key=key,value=value),self.assertRaises(ValueError):op.verify_preserved_state(before,changed,"production","new")
-        with self.assertRaises(ValueError):op.verify_preserved_state(before,after,"test","new")
+        for mode in ("Auto", "FunctionUpdate"):
+            test_before, test_after = self.snapshots(mode)
+            op.verify_preserved_state(test_before,test_after,"test","new")
+        for mode in ("Manual", None, "unknown"):
+            test_before, test_after = self.snapshots(mode)
+            with self.subTest(test_mode=mode),self.assertRaises(ValueError):
+                op.verify_preserved_state(test_before,test_after,"test","new")
+        with self.assertRaises(ValueError):op.verify_preserved_state(before,after,"unknown","new")
 
     def test_runtime_management_reads_exact_function_and_matches_native_template(self):
         from unittest.mock import patch
