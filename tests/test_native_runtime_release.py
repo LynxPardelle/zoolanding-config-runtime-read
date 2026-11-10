@@ -247,6 +247,16 @@ class NativeReleaseReviewTests(unittest.TestCase):
 
 
 class ManagedProductionRuntimeTests(unittest.TestCase):
+    def test_review_receipt_excludes_native_context_and_rejects_invalid_coordinates(self):
+        op=self.operator()
+        receipt=getattr(op,"public_review_receipt",None)
+        self.assertTrue(callable(receipt))
+        arn="arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-runtime-123-1/11111111-1111-1111-1111-111111111111"
+        result=receipt("a"*64,{"ChangeSetId":arn,"BeforeContext":"private-marker"})
+        self.assertEqual(result,{"review_inventory_digest":"a"*64,"review_change_set_arn":arn})
+        for digest,description in (("not-a-hash",{"ChangeSetId":arn}),("a"*64,{"ChangeSetId":"unexpected"})):
+            with self.subTest(digest=digest),self.assertRaises(ValueError):receipt(digest,description)
+
     def operator(self):
         spec=importlib.util.spec_from_file_location("managed_runtime_operator",ROOT/"tools/native_runtime_release.py")
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
