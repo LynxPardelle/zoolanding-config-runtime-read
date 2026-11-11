@@ -138,7 +138,7 @@ def _github_read(path):
     return json.loads(result.stdout)
 
 
-def previous_test_execution(source):
+def previous_test_execution(source, snapshot=None):
     """A Code pointer is insufficient without its successful protected execution."""
     if not re.fullmatch(r"[a-f0-9]{40}", str(source)): _reject()
     response = _github_read(f"actions/workflows/deploy-test.yml/runs?head_sha={source}&event=workflow_dispatch&status=success&per_page=100")
@@ -147,6 +147,7 @@ def previous_test_execution(source):
         or response["total_count"] != len(runs) or len(runs) > 10
         or any(not isinstance(run, dict) or type(run.get("id")) is not int or run["id"] < 1 for run in runs)
         or len({run["id"] for run in runs}) != len(runs)): _reject()
+    native_reviews = []
     for run in sorted(runs, key=lambda item: item["id"], reverse=True):
         if (run.get("head_sha") != source or run.get("head_branch") != "test" or run.get("event") != "workflow_dispatch"
             or run.get("status") != "completed" or run.get("conclusion") != "success"
@@ -170,6 +171,30 @@ def previous_test_execution(source):
         if any(len(matches) != 1 for matches in required): _reject()
         if all(matches[0].get("status") == "completed" and matches[0].get("conclusion") == "success" for matches in required):
             return {"runId": run["id"], "runAttempt": run["run_attempt"], "headSha": source}
+        if (required[0][0].get("status") == "completed" and required[0][0].get("conclusion") == "success"
+            and required[1][0].get("status") == "completed" and required[1][0].get("conclusion") == "skipped"):
+            native_reviews.append(run)
+    # A managed patch can fail a workflow postflight after CloudFormation has
+    # successfully executed the reviewed change. Recover only the successful
+    # protected REVIEW that owns the current stack's exact executed native ARN.
+    # The live qualified ZIP and complete promoted SAM projection are still
+    # independently verified by test_release_binding and code_pointer_candidate.
+    if isinstance(snapshot, dict):
+        arn = snapshot.get("changeSetId", "")
+        for run in native_reviews:
+            if not re.fullmatch(r"arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-runtime-"
+                                + str(run["id"]) + "-" + str(run["run_attempt"]) + r"/[a-f0-9-]+", str(arn)):
+                continue
+            native = aws("cloudformation", "describe-change-set", "--stack-name", snapshot["stackId"], "--change-set-name", arn)
+            if (native.get("StackId") != snapshot["stackId"] or native.get("ChangeSetId") != arn
+                or native.get("Status") != "CREATE_COMPLETE" or native.get("ExecutionStatus") != "EXECUTE_COMPLETE"
+                or native.get("IncludeNestedStacks") is True or native.get("NextToken")): _reject()
+            for stage, key in (("Original", "original"), ("Processed", "processed")):
+                actual = aws("cloudformation", "get-template", "--stack-name", snapshot["stackId"],
+                             "--change-set-name", arn, "--template-stage", stage)["TemplateBody"]
+                if _canonical(_template(actual)) != _canonical(_template(snapshot[key])): _reject()
+            return {"runId": run["id"], "runAttempt": run["run_attempt"], "headSha": source,
+                    "nativeChangeSetArn": arn, "nativeExecutionStatus": "EXECUTE_COMPLETE"}
     _reject()
 
 
@@ -206,7 +231,7 @@ def sam_source_reference(snapshot, candidate_text):
     function["Metadata"] = {"SamResourceId": "ConfigRuntimeReadFunction"}
     function["Properties"].update(CodeUri="runtime-read.zip", AutoPublishAlias="live", AutoPublishAliasAllProperties=True, VersionDeletionPolicy="Retain")
     verify_sam_source(candidate_text, template)
-    execution = previous_test_execution(source)
+    execution = previous_test_execution(source, snapshot)
     return {"kind": "previous-protected-git-sam", "sourceSha": source, "gitBlobSha": blob_sha,
             "rawSha256": hashlib.sha256(raw).hexdigest(), "samSha256": hashlib.sha256(_canonical(template)).hexdigest(),
             "execution": execution}
@@ -499,6 +524,7 @@ def baseline(profile, expected_change_set_arn=None):
         authority={"sourceAuthority":source_authority(os.environ),"permissionAuthority":permission_authority(os.environ.get("GITHUB_REPOSITORY"),aws)}
     result={**authority,"cloudFormationRoleArn":stack.get("RoleARN"),"stackStatus":stack["StackStatus"],"stackId":stack["StackId"],"parameters":sorted(stack.get("Parameters",[]),key=lambda item:item["ParameterKey"]),
         "outputs":sorted(stack.get("Outputs",[]),key=lambda item:item["OutputKey"]),"identities":identities,"functions":functions,
+        "changeSetId":stack.get("ChangeSetId"),
         "original":aws("cloudformation","get-template","--stack-name",profile["stack"],"--template-stage","Original")["TemplateBody"],
         "processed":aws("cloudformation","get-template","--stack-name",profile["stack"],"--template-stage","Processed")["TemplateBody"]}
     if profile["stack"]==PROFILES["production"]["stack"]:
