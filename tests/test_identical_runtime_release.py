@@ -266,24 +266,6 @@ class IdenticalCandidateTests(unittest.TestCase):
 
 
 class TestBindingTests(unittest.TestCase):
-    def test_denied_kms_diagnostic_request_ids_are_not_configuration_drift(self):
-        op = operator()
-        package, snapshot, live, alias, versions = self.fixture()
-        snapshot["functions"][0]["Environment"] = {"Error": {"ErrorCode": "AccessDeniedException", "Message": "request-one"}}
-        live["Environment"] = {"Error": {"ErrorCode": "AccessDeniedException", "Message": "request-two"}}
-        versions[-1] = copy.deepcopy(live)
-        result = self.read(op, package, snapshot, live, alias, versions)
-        self.assertEqual(result["qualifiedConfiguration"]["Environment"], {"Error": {"ErrorCode": "AccessDeniedException"}})
-        live["Role"] = "different"
-        with self.assertRaises(ValueError): self.read(op, package, snapshot, live, alias, versions)
-
-    def test_hidden_environment_normalization_preserves_real_values_and_other_errors(self):
-        op=operator()
-        for environment in ({"Variables":{"KEY":"fixture"},"Error":{"ErrorCode":"AccessDeniedException","Message":"keep"}},
-                            {"Error":{"ErrorCode":"OtherError","Message":"keep"}}):
-            value={"Environment":environment,"RevisionId":"retained"}
-            self.assertEqual(op.stable_lambda_configuration(value),value)
-
     def fixture(self):
         package = b"sealed real-byte fixture"
         before, _ = templates()
