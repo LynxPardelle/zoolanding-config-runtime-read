@@ -30,7 +30,7 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 - Resolve alias domains back to the canonical site and environment when `site-config.json.aliases` or `site-config.json.environments.*.aliases` declares alternate hosts.
 - Resolve the current page by host and route.
 - Resolve exact routes before parameterized route patterns such as `/blog/:categorySlug`.
-- Honor an optional canonical `routes[].language` before request/default language selection, while leaving language-free routes on their legacy precedence.
+- Honor an optional canonical `routes[].language` before request/default language selection, preserve exact supported request locales, and resolve regional requests to a published base language when available.
 - Load the published payload set from S3, rejecting individual JSON objects larger than 1 MiB before parsing.
 - Merge shared and page components.
 - Merge shared and page variables, angora combos, and i18n dictionaries.
@@ -148,7 +148,7 @@ Runtime Read resolves an exact site-config route before older metadata and befor
 
 The active immutable published pointer and its package are the runtime source of truth. Config Authoring updates the registry's package-derived `defaultPageId`, `routes`, and `contentHubs` fields for a newer draft before that draft is published. When the registry draft pointer does not identify the active published version, Runtime Read removes all three fields from its published-metadata view and relies on the immutable published `site-config.json` plus legacy `default` fallback. Draft-ahead defaults, routes, and hubs are therefore not resolved, validated, or projected until publication moves the environment pointer. Metadata without a draft pointer and metadata whose draft pointer matches the published version retain their compatibility behavior; metadata routes remain limited to paths present in the published site config.
 
-Routes without `language` continue using request `lang`, then the site default, then `en`, including the historical lowercase safe-ID treatment for configured defaults and their payload filenames. Strict canonical normalization is applied only to present `routes[].language` values; it does not rewrite ordinary-route locale behavior.
+For routes without `language`, an exact supported request locale keeps its original request spelling and payload filename behavior. Otherwise, a regional request uses its base language when that base appears in `site.i18n.supportedLanguages`: for example, `lang=es-419` selects `es` on a site publishing `es` and `en`, and the returned `lang` and dictionary paths use `es`. A fixed route language still takes precedence over both cases. Requests without a supported exact or base match retain the previous request/default/`en` behavior, including the historical lowercase safe-ID treatment for configured defaults and their payload filenames.
 
 Every present route language must already be canonical, must appear in `site.i18n.supportedLanguages` (string or `{ "code": "..." }` form), and must have a nonempty, trim-stable string `pageId`. Each `(pageId, language)` must be unique within its route source. Runtime Read validates the published site config and any in-snapshot metadata fallback before loading localized payloads and before returning maintenance or suspension fallbacks. Invalid, unsupported, noncanonical, malformed-page, or duplicate published values fail closed through the generic public `500` response without returning route content or private diagnostics.
 
@@ -358,10 +358,22 @@ access for previous execution provenance. This changes operation tooling only;
 the Lambda package still contains exactly the same two runtime files. Production
 retains its existing topology and separate reviewed activation path.
 
-AWS `Auto` runtime management may apply a patch even for an identical Code update.
-TEST postflight remains strict: a changed runtime stops promotion for diagnosis.
-The production managed-patch exception is not applied to TEST. The full design is
-in [the identical-package release specification](docs/superpowers/specs/2026-09-28-runtime-identical-package-release.md).
+AWS automatic runtime management may apply a Python patch during a Code update.
+TEST and production postflight permit only a `RuntimeVersionArn` transition with
+the same verified `Auto` or `FunctionUpdate` management mode, `python3.13` runtime,
+ZIP package and architecture. Every other function setting, native identity,
+template and code digest remains checked; manual management, malformed runtime
+metadata and unrelated configuration changes are rejected. The identical-package
+TEST path additionally preserves the complete qualified configuration, published
+version list and `live` alias binding, so a change to those bindings still stops
+promotion. The historical [identical-package release specification](docs/superpowers/specs/2026-09-28-runtime-identical-package-release.md)
+records the original stricter TEST policy before this narrowly bounded update.
+
+The TEST deployment role must be able to read the exact immutable version selected
+by `live` with `lambda:GetFunction`. A new published version can require a separately
+reviewed revision of the existing supplemental read policy. Verify effective IAM
+decisions for that exact qualifier and preserve all other policies and role trust;
+the native release operator does not automatically grant access to future versions.
 
 The dedicated THN v2 runtime maps server `ENVIRONMENT_NAME=prod|production` to
 canonical `production` and `test` to `test`. It requires exact journal-owner,
