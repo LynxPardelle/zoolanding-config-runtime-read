@@ -247,6 +247,20 @@ class NativeReleaseReviewTests(unittest.TestCase):
 
 
 class ManagedProductionRuntimeTests(unittest.TestCase):
+    def test_failure_receipt_reports_only_closed_phase_names(self):
+        op=self.operator()
+        self.assertEqual(op.failure_receipt("test-live-binding"),"native_runtime_release_rejected:test-live-binding")
+        self.assertEqual(op.failure_receipt("private exception data"),"native_runtime_release_rejected")
+    def test_review_receipt_excludes_native_context_and_rejects_invalid_coordinates(self):
+        op=self.operator()
+        receipt=getattr(op,"public_review_receipt",None)
+        self.assertTrue(callable(receipt))
+        arn="arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-runtime-123-1/11111111-1111-1111-1111-111111111111"
+        result=receipt("a"*64,{"ChangeSetId":arn,"BeforeContext":"private-marker"})
+        self.assertEqual(result,{"review_inventory_digest":"a"*64,"review_change_set_arn":arn})
+        for digest,description in (("not-a-hash",{"ChangeSetId":arn}),("a"*64,{"ChangeSetId":"unexpected"})):
+            with self.subTest(digest=digest),self.assertRaises(ValueError):receipt(digest,description)
+
     def operator(self):
         spec=importlib.util.spec_from_file_location("managed_runtime_operator",ROOT/"tools/native_runtime_release.py")
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
@@ -288,7 +302,14 @@ class ManagedProductionRuntimeTests(unittest.TestCase):
                           ("RuntimeVersionConfig",{"RuntimeVersionArn":"arn:aws:lambda:us-east-1::runtime:"+"2"*64,"Error":{"ErrorCode":"InvalidRuntime"}})):
             changed=copy.deepcopy(after);changed["functions"][0][key]=value
             with self.subTest(key=key,value=value),self.assertRaises(ValueError):op.verify_preserved_state(before,changed,"production","new")
-        with self.assertRaises(ValueError):op.verify_preserved_state(before,after,"test","new")
+        for mode in ("Auto", "FunctionUpdate"):
+            test_before, test_after = self.snapshots(mode)
+            op.verify_preserved_state(test_before,test_after,"test","new")
+        for mode in ("Manual", None, "unknown"):
+            test_before, test_after = self.snapshots(mode)
+            with self.subTest(test_mode=mode),self.assertRaises(ValueError):
+                op.verify_preserved_state(test_before,test_after,"test","new")
+        with self.assertRaises(ValueError):op.verify_preserved_state(before,after,"unknown","new")
 
     def test_runtime_management_reads_exact_function_and_matches_native_template(self):
         from unittest.mock import patch

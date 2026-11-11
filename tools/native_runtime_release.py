@@ -19,9 +19,30 @@ except ModuleNotFoundError:
 
 PROFILES={"test":{"stack":"zoolanding-config-runtime-read-test","bucket":"zoolanding-config-payloads-test"},
           "production":{"stack":"zoolanding-config-runtime-read","bucket":"zoolanding-config-payloads"}}
+RELEASE_PHASE = "input"
+RELEASE_PHASES = {"input", "baseline", "test-live-binding", "test-qualified-version-read", "source-reference", "projection", "package", "baseline-seal", "native-review", "review-seal", "execute", "postflight"}
+
+
+def phase(value):
+    global RELEASE_PHASE
+    if value not in RELEASE_PHASES: _reject()
+    RELEASE_PHASE = value
+
+
+def failure_receipt(value):
+    return "native_runtime_release_rejected" + (":" + value if value in RELEASE_PHASES else "")
 
 
 def _reject(): raise ValueError("native_runtime_release_rejected")
+
+
+def public_review_receipt(digest, description):
+    arn = description.get("ChangeSetId") if isinstance(description, dict) else None
+    if (not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)
+        or not isinstance(arn, str) or not re.fullmatch(
+            r"arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-runtime-[1-9][0-9]*-[1-9][0-9]*/[a-f0-9-]+", arn)):
+        _reject()
+    return {"review_inventory_digest": digest, "review_change_set_arn": arn}
 
 
 def _template(value):
@@ -293,6 +314,7 @@ def test_release_binding(snapshot, package):
     if (identities.get("ConfigRuntimeReadFunction", {}).get("PhysicalResourceId") != function
         or identities.get("ConfigRuntimeReadFunctionAliaslive", {}).get("PhysicalResourceId") != arn + ":live"
         or identities.get(version_ref[0], {}).get("PhysicalResourceId") != arn + ":" + version): _reject()
+    phase("test-qualified-version-read")
     result = aws("lambda", "get-function", "--function-name", function, "--qualifier", version)
     qualified = result["Configuration"]
     if qualified.get("FunctionArn") != arn + ":" + version or qualified.get("Version") != version: _reject()
@@ -499,12 +521,15 @@ def baseline(profile, expected_change_set_arn=None):
 
 
 def release_snapshot(profile, package, candidate_text=None, expected_change_set_arn=None):
+    phase("baseline")
     snapshot = baseline(profile) if expected_change_set_arn is None else baseline(profile, expected_change_set_arn)
     if profile == PROFILES["test"]:
+        phase("test-live-binding")
         if len(snapshot["functions"]) != 1: _reject()
         snapshot["runtimeManagement"] = runtime_management(snapshot["functions"][0], snapshot["processed"])
         snapshot["testReleaseBinding"] = test_release_binding(snapshot, package)
         if candidate_text is not None:
+            phase("source-reference")
             snapshot["sourceReference"] = sam_source_reference(snapshot, candidate_text)
     else:
         snapshot["testBinding"] = live_test_zip(package)
@@ -536,7 +561,7 @@ def verify_preserved_state(before,after,environment,code_sha):
     left=copy.deepcopy(before["functions"][0]);right=copy.deepcopy(after["functions"][0])
     for key in ("CodeSha256","CodeSize","LastModified","RevisionId","LastUpdateStatus","LastUpdateStatusReason","LastUpdateStatusReasonCode"):
         left.pop(key,None);right.pop(key,None)
-    if left!=right and (environment!="production" or not same_managed_patch_configuration(left,right,before.get("runtimeManagement"))):_reject()
+    if left!=right and (environment not in {"test", "production"} or not same_managed_patch_configuration(left,right,before.get("runtimeManagement"))):_reject()
 
 
 def main():
@@ -560,6 +585,7 @@ def main():
         expected_change_set_arn=args.review_change_set_arn if args.execution=="execute" else None)
     identical = args.environment == "test" and snapshot["testReleaseBinding"]["identicalPackage"]
     if args.environment == "test":
+        phase("projection")
         # Validate the complete promoted source before any package or preview write.
         current_code = _template(snapshot["processed"])["Resources"]["ConfigRuntimeReadFunction"]["Properties"]["Code"]
         projected, params = project_test_template(text, snapshot, current_code)
@@ -567,6 +593,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="thn-native-release-") as temp:
         tmp=Path(temp)
         if args.execution=="review":
+            phase("package")
             if args.review_digest or args.review_change_set_arn:_reject()
             require_versioned_bucket(profile)
             key=f"system/thn-runtime/releases/{args.source_sha}/{zip_digest}.zip"
@@ -600,7 +627,9 @@ def main():
             if not re.fullmatch(r"[1-9][0-9]*",run) or not re.fullmatch(r"[1-9][0-9]*",attempt):_reject()
             parameters=tmp/"parameters.json";parameters.write_bytes(_canonical([{"ParameterKey":item["ParameterKey"],"UsePreviousValue":True} for item in snapshot["parameters"]]))
             immediate=release_snapshot(profile, package, text)
+            phase("baseline-seal")
             if immediate!=snapshot:_reject()
+            phase("native-review")
             change=aws("cloudformation","create-change-set","--stack-name",profile["stack"],"--change-set-name",f"thn-runtime-{run}-{attempt}",
                 "--change-set-type","UPDATE","--template-body","file://"+str(candidate),"--parameters","file://"+str(parameters),
                 "--capabilities","CAPABILITY_IAM","--role-arn",os.environ["AWS_CLOUDFORMATION_ROLE_ARN"])["Id"]
@@ -610,6 +639,7 @@ def main():
             change=args.review_change_set_arn
             if not re.fullmatch(r"arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-runtime-[1-9][0-9]*-[1-9][0-9]*/[a-f0-9-]+",change) or not re.fullmatch(r"[a-f0-9]{64}",args.review_digest):_reject()
         description=aws("cloudformation","describe-change-set","--stack-name",profile["stack"],"--change-set-name",change,"--include-property-values")
+        phase("native-review")
         if description.get("ChangeSetId")!=change or description.get("StackId")!=snapshot["stackId"] or description.get("Status")!="CREATE_COMPLETE" or description.get("ExecutionStatus")!="AVAILABLE":_reject()
         original=aws("cloudformation","get-template","--stack-name",profile["stack"],"--change-set-name",change,"--template-stage","Original")["TemplateBody"]
         processed=aws("cloudformation","get-template","--stack-name",profile["stack"],"--change-set-name",change,"--template-stage","Processed")["TemplateBody"]
@@ -627,28 +657,33 @@ def main():
         if (tmp/"reviewed.zip").read_bytes()!=package:_reject()
         digest=preview_digest(snapshot,description,original,processed,args.source_sha,args.manifest_digest,zip_digest)
         fresh=release_snapshot(profile, package, text, expected_change_set_arn=change)
+        phase("review-seal")
         if fresh!=snapshot:_reject()
         if args.execution=="execute":
             if digest!=args.review_digest:_reject()
             review_window(description)
             immediate=release_snapshot(profile, package, text, expected_change_set_arn=change)
             if immediate!=snapshot:_reject()
+            phase("execute")
             aws("cloudformation","execute-change-set","--stack-name",profile["stack"],"--change-set-name",change)
             wait=subprocess.run(["aws","cloudformation","wait","stack-update-complete","--stack-name",profile["stack"]],capture_output=True)
             if wait.returncode:_reject()
             after=release_snapshot(profile, package)
+            phase("postflight")
             verify_preserved_state(snapshot,after,args.environment,code_sha)
             if args.environment == "test" and _canonical(_template(after["processed"])) != _canonical(_template(processed)): _reject()
             if identical: verify_neutral_state(snapshot, after, code)
             if args.environment=="production" and live_test_zip(package)!=snapshot["testBinding"]:_reject()
         else:
+            receipt = public_review_receipt(digest, description)
             with open(os.environ["GITHUB_STEP_SUMMARY"],"a",encoding="utf-8") as summary:
                 summary.write(f"review_inventory_digest={digest}\nreview_change_set_arn={change}\n")
                 for entry in description["Changes"]:
                     resource=entry["ResourceChange"];summary.write(f"- {resource['Action']} {resource['LogicalResourceId']} {resource['ResourceType']} replacement={resource.get('Replacement')}\n")
+            print(json.dumps(receipt, sort_keys=True))
         print("native_runtime_release_verified")
 
 
 if __name__=="__main__":
     try:main()
-    except Exception:raise SystemExit("native_runtime_release_rejected") from None
+    except Exception:raise SystemExit(failure_receipt(RELEASE_PHASE)) from None
