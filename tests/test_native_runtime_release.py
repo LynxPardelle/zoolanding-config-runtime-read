@@ -247,6 +247,10 @@ class NativeReleaseReviewTests(unittest.TestCase):
 
 
 class ManagedProductionRuntimeTests(unittest.TestCase):
+    def test_failure_receipt_reports_only_closed_phase_names(self):
+        op=self.operator()
+        self.assertEqual(op.failure_receipt("test-live-binding"),"native_runtime_release_rejected:test-live-binding")
+        self.assertEqual(op.failure_receipt("private exception data"),"native_runtime_release_rejected")
     def test_review_receipt_excludes_native_context_and_rejects_invalid_coordinates(self):
         op=self.operator()
         receipt=getattr(op,"public_review_receipt",None)
