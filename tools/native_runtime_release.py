@@ -20,7 +20,7 @@ except ModuleNotFoundError:
 PROFILES={"test":{"stack":"zoolanding-config-runtime-read-test","bucket":"zoolanding-config-payloads-test"},
           "production":{"stack":"zoolanding-config-runtime-read","bucket":"zoolanding-config-payloads"}}
 RELEASE_PHASE = "input"
-RELEASE_PHASES = {"input", "baseline", "test-live-binding", "source-reference", "projection", "package", "baseline-seal", "native-review", "review-seal", "execute", "postflight"}
+RELEASE_PHASES = {"input", "baseline", "test-live-binding", "test-qualified-version-read", "source-reference", "projection", "package", "baseline-seal", "native-review", "review-seal", "execute", "postflight"}
 
 
 def phase(value):
@@ -34,15 +34,6 @@ def failure_receipt(value):
 
 
 def _reject(): raise ValueError("native_runtime_release_rejected")
-
-
-def stable_lambda_configuration(value):
-    value = copy.deepcopy(value)
-    environment = value.get("Environment", {})
-    error = environment.get("Error", {})
-    if "Variables" not in environment and error.get("ErrorCode") == "AccessDeniedException":
-        error.pop("Message", None)
-    return value
 
 
 def public_review_receipt(digest, description):
@@ -302,7 +293,7 @@ def code_pointer_candidate(before, projected, parameter_values=None):
 def test_release_binding(snapshot, package):
     """Seal the actual qualified bytes and every published version, never its URL."""
     if len(snapshot["functions"]) != 1: _reject()
-    latest = stable_lambda_configuration(snapshot["functions"][0])
+    latest = snapshot["functions"][0]
     function = latest.get("FunctionName")
     arn = latest.get("FunctionArn")
     if (not isinstance(function, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", function)
@@ -323,18 +314,12 @@ def test_release_binding(snapshot, package):
     if (identities.get("ConfigRuntimeReadFunction", {}).get("PhysicalResourceId") != function
         or identities.get("ConfigRuntimeReadFunctionAliaslive", {}).get("PhysicalResourceId") != arn + ":live"
         or identities.get(version_ref[0], {}).get("PhysicalResourceId") != arn + ":" + version): _reject()
+    phase("test-qualified-version-read")
     result = aws("lambda", "get-function", "--function-name", function, "--qualifier", version)
-    qualified = stable_lambda_configuration(result["Configuration"])
-    if qualified.get("Environment", {}).get("Error", {}).get("ErrorCode") == "AccessDeniedException":
-        print("native_test_binding_hidden_environment_diagnostic")
+    qualified = result["Configuration"]
     if qualified.get("FunctionArn") != arn + ":" + version or qualified.get("Version") != version: _reject()
     identity_fields = {"FunctionArn", "RevisionId", "Version", "LastModified"}
-    if {k:v for k,v in latest.items() if k not in identity_fields} != {k:v for k,v in qualified.items() if k not in identity_fields}:
-        public_fields = {"Environment", "RuntimeVersionConfig", "Runtime", "Role", "State", "LastUpdateStatus", "CodeSha256", "Handler", "PackageType", "Architectures", "LoggingConfig"}
-        differences = {key if key in public_fields else "other" for key in set(latest) | set(qualified)
-                       if key not in identity_fields and latest.get(key) != qualified.get(key)}
-        print(json.dumps({"native_test_binding_difference_fields": sorted(differences)}))
-        _reject()
+    if {k:v for k,v in latest.items() if k not in identity_fields} != {k:v for k,v in qualified.items() if k not in identity_fields}: _reject()
     location = result["Code"]["Location"]
     lambda_task_url(location)
     with urlopen(location, timeout=20) as response:
@@ -343,7 +328,7 @@ def test_release_binding(snapshot, package):
     if base64.b64encode(digest).decode() != qualified.get("CodeSha256"): _reject()
     versions = aws("lambda", "list-versions-by-function", "--function-name", function)
     if set(versions) - {"Versions", "NextMarker", "ResponseMetadata"} or versions.get("NextMarker"): _reject()
-    published = sorted([stable_lambda_configuration(item) for item in versions["Versions"] if item.get("Version") != "$LATEST"], key=lambda item: item["Version"])
+    published = sorted([item for item in versions["Versions"] if item.get("Version") != "$LATEST"], key=lambda item: item["Version"])
     if len({item["Version"] for item in published}) != len(published): _reject()
     if any(not re.fullmatch(r"[1-9][0-9]*", str(item.get("Version")))
            or item.get("FunctionArn") != arn + ":" + item["Version"] for item in published): _reject()
@@ -521,7 +506,7 @@ def baseline(profile, expected_change_set_arn=None):
     resources=aws("cloudformation","list-stack-resources","--stack-name",profile["stack"])["StackResourceSummaries"]
     require_stable_stack(profile, stack, resources, expected_change_set_arn)
     identities=sorted([{key:item.get(key) for key in ("LogicalResourceId","PhysicalResourceId","ResourceType")} for item in resources],key=lambda item:item["LogicalResourceId"])
-    functions=[stable_lambda_configuration(aws("lambda","get-function-configuration","--function-name",item["PhysicalResourceId"])) for item in identities if item["ResourceType"]=="AWS::Lambda::Function"]
+    functions=[aws("lambda","get-function-configuration","--function-name",item["PhysicalResourceId"]) for item in identities if item["ResourceType"]=="AWS::Lambda::Function"]
     authority={}
     if profile["stack"]==PROFILES["production"]["stack"]:
         authority={"sourceAuthority":source_authority(os.environ),"permissionAuthority":permission_authority(os.environ.get("GITHUB_REPOSITORY"),aws)}
