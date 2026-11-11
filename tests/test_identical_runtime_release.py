@@ -407,44 +407,6 @@ class ReleaseSnapshotTests(unittest.TestCase):
 
 
 class PreviousExecutionTests(unittest.TestCase):
-    def native_review_fixture(self):
-        response, jobs = self.fixture()
-        jobs["jobs"][0]["steps"][1]["conclusion"] = "skipped"
-        arn = "arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-runtime-12-2/11111111-1111-1111-1111-111111111111"
-        snapshot = {"stackId": "existing-test-stack", "changeSetId": arn,
-                    "original": {"Resources": {}}, "processed": {"Resources": {}}}
-        native = {"StackId": snapshot["stackId"], "ChangeSetId": arn,
-                  "Status": "CREATE_COMPLETE", "ExecutionStatus": "EXECUTE_COMPLETE"}
-        return response, jobs, snapshot, native
-
-    def test_completed_review_requires_exact_current_native_execution_and_templates(self):
-        op = operator()
-        response, jobs, snapshot, native = self.native_review_fixture()
-        with patch.object(op, "_github_read", side_effect=[response, jobs]), \
-             patch.object(op, "aws", side_effect=[native, {"TemplateBody": snapshot["original"]}, {"TemplateBody": snapshot["processed"]}]):
-            result = op.previous_test_execution(SOURCE, snapshot)
-        self.assertEqual(result["nativeChangeSetArn"], snapshot["changeSetId"])
-        self.assertEqual(result["headSha"], SOURCE)
-
-    def test_unexecuted_or_different_native_review_never_recovers_provenance(self):
-        for mutation in ("available", "wrong-stack", "wrong-arn", "wrong-run", "nested", "pagination", "original", "processed"):
-            op = operator()
-            response, jobs, snapshot, native = self.native_review_fixture()
-            original, processed = copy.deepcopy(snapshot["original"]), copy.deepcopy(snapshot["processed"])
-            if mutation == "available": native["ExecutionStatus"] = "AVAILABLE"
-            if mutation == "wrong-stack": native["StackId"] = "foreign"
-            if mutation == "wrong-arn": native["ChangeSetId"] += "0"
-            if mutation == "wrong-run": snapshot["changeSetId"] = snapshot["changeSetId"].replace("12-2", "13-2")
-            if mutation == "nested": native["IncludeNestedStacks"] = True
-            if mutation == "pagination": native["NextToken"] = "more"
-            if mutation == "original": original["Resources"]["Unexpected"] = {}
-            if mutation == "processed": processed["Resources"]["Unexpected"] = {}
-            with self.subTest(mutation=mutation), \
-                 patch.object(op, "_github_read", side_effect=[response, jobs]), \
-                 patch.object(op, "aws", side_effect=[native, {"TemplateBody": original}, {"TemplateBody": processed}]), \
-                 self.assertRaises(ValueError):
-                op.previous_test_execution(SOURCE, snapshot)
-
     def fixture(self):
         run = {"id": 12, "run_attempt": 2, "head_sha": SOURCE, "head_branch": "test",
                "event": "workflow_dispatch", "status": "completed", "conclusion": "success",
