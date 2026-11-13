@@ -409,6 +409,114 @@ def _runtime_content_hubs(site_config: Optional[Dict[str, Any]]) -> list[Dict[st
     ]
 
 
+SHARED_ZOOSITE_HUB = "zoosite-main"
+SHARED_ZOOSITE_OWNER = "zoositioweb.com.mx"
+SHARED_ZOOSITE_READER = "zooberiahsystems.com"
+
+
+def _is_shared_zoosite_blog(domain: str, hub: Dict[str, Any]) -> bool:
+    return (
+        domain == SHARED_ZOOSITE_READER
+        and hub.get("hubId") == SHARED_ZOOSITE_HUB
+        and hub.get("ownerDraftDomain") == SHARED_ZOOSITE_OWNER
+        and hub.get("source") == "authorized"
+        and hub.get("canonicalMode") == "noindex-shared"
+        and hub.get("routeBasePath") == hub.get("listPath") == "/blog"
+        and hub.get("articlePathPattern") == "/blog/:categorySlug/:articleSlug"
+    )
+
+
+def _has_shared_zoosite_blog(site_config: Optional[Dict[str, Any]], path: str) -> bool:
+    domain = normalize_domain((site_config or {}).get("domain"))
+    return bool(re.fullmatch(r"/blog/[a-z0-9-]+/[a-z0-9-]+", path)) and any(
+        _is_shared_zoosite_blog(domain, hub) for hub in _runtime_content_hubs(site_config)
+    )
+
+
+def _shared_zoosite_owner_hub(environment: str) -> Optional[Dict[str, Any]]:
+    metadata = load_item(CONFIG_TABLE_NAME, site_pk(SHARED_ZOOSITE_OWNER))
+    if not isinstance(metadata, dict):
+        return None
+    lifecycle = metadata.get("lifecycle")
+    if isinstance(lifecycle, dict) and lifecycle.get("status", "active") != "active":
+        return None
+    published = _published_pointer(metadata, environment)
+    if not published:
+        return None
+    version_id = str(published.get("versionId") or "").strip()
+    prefix = str(published.get("prefix") or (default_version_prefix(SHARED_ZOOSITE_OWNER, version_id) if version_id else "")).strip()
+    if not prefix:
+        return None
+    source = _load_payload(CONFIG_PAYLOADS_BUCKET_NAME, prefix, f"{SHARED_ZOOSITE_OWNER}/site-config.json")
+    if not isinstance(source, dict) or normalize_domain(source.get("domain")) != SHARED_ZOOSITE_OWNER:
+        return None
+    return next((
+        hub for hub in _runtime_content_hubs(source)
+        if hub.get("hubId") == SHARED_ZOOSITE_HUB
+        and hub.get("ownerDraftDomain") == SHARED_ZOOSITE_OWNER
+        and hub.get("source") == "primary"
+    ), None)
+
+
+def _shared_zoosite_asset(value: Any) -> Any:
+    if isinstance(value, str) and value.startswith("/") and not value.startswith("//") and "\\" not in value:
+        return f"https://{SHARED_ZOOSITE_OWNER}{value}"
+    return value
+
+
+def _shared_zoosite_link(value: Any) -> Any:
+    if isinstance(value, str) and (value.startswith("/blog/") or value == "/blog"):
+        return value
+    return _shared_zoosite_asset(value)
+
+
+def _shared_zoosite_content(content: Any) -> Any:
+    # Editorial bundles store Quill changes, while legacy published entries store HTML.
+    if isinstance(content, dict) and isinstance(content.get("ops"), list):
+        content = {"ops": _public_content_hub_payload(content["ops"])}
+    else:
+        content = _content_hub_article_content(content)
+    if not isinstance(content, dict):
+        return content
+    ops = content.get("ops")
+    for op in ops if isinstance(ops, list) else []:
+        if not isinstance(op, dict):
+            continue
+        attributes = op.get("attributes")
+        if isinstance(attributes, dict) and "link" in attributes:
+            attributes["link"] = _shared_zoosite_link(attributes["link"])
+        insert = op.get("insert")
+        if isinstance(insert, dict) and "image" in insert:
+            insert["image"] = _shared_zoosite_asset(insert["image"])
+    if isinstance(content.get("html"), str):
+        content["html"] = re.sub(
+            r"""(\shref\s*=\s*)(["'])([^"']*)\2""",
+            lambda match: f"{match[1]}{match[2]}{_shared_zoosite_link(match[3])}{match[2]}",
+            content["html"],
+            flags=re.IGNORECASE,
+        )
+        content["html"] = re.sub(
+            r"""(<img\b[^<>]*?\ssrc\s*=\s*)(["'])([^"']*)\2""",
+            lambda match: f"{match[1]}{match[2]}{_shared_zoosite_asset(match[3])}{match[2]}",
+            content["html"],
+            flags=re.IGNORECASE,
+        )
+    return content
+
+
+def _shared_zoosite_article(article: Dict[str, Any]) -> Dict[str, Any]:
+    article = _project_public_object(article, (
+        "articleId", "locale", "status", "title", "path", "publishedAt", "summary", "categorySlug", "tags",
+        "updatedAt", "canonicalPath", "articleContent", "imageSrc", "imageAlt", "authorLabel",
+    ))
+    article["robots"] = "noindex,follow"
+    if "articleContent" in article:
+        article["articleContent"] = _shared_zoosite_content(article["articleContent"])
+    if "imageSrc" in article:
+        article["imageSrc"] = _shared_zoosite_asset(article["imageSrc"])
+    return article
+
+
 def _safe_content_hub_timestamp(value: Any) -> str:
     text = str(value or "").strip()
     return text if text and re.fullmatch(r"\d{4}-\d{2}-\d{2}T[0-9:.+-]+Z?", text) else ""
@@ -963,6 +1071,8 @@ def _content_hub_bundle_for_path(
         hub_id = _safe_content_hub_id(hub.get("hubId"))
         if not hub_id:
             continue
+        shared = _is_shared_zoosite_blog(render_domain, hub)
+        bundle_domain = SHARED_ZOOSITE_OWNER if shared else render_domain
         locale = _content_hub_locale(hub, lang)
         public_articles = hub.get("publicArticles") if isinstance(hub.get("publicArticles"), list) else []
         for article in public_articles:
@@ -984,13 +1094,13 @@ def _content_hub_bundle_for_path(
                 bundle_key,
                 environment=environment,
                 hub_id=hub_id,
-                render_domain=render_domain,
+                render_domain=bundle_domain,
                 locale=locale,
                 article_id=article_id,
             ):
                 slug_pointer = _load_content_hub_slug_pointer(
                     environment=environment,
-                    render_domain=render_domain,
+                    render_domain=bundle_domain,
                     locale=locale,
                     path=normalized_path,
                 )
@@ -1000,11 +1110,22 @@ def _content_hub_bundle_for_path(
                 bundle_key,
                 environment,
                 hub_id,
-                render_domain,
+                bundle_domain,
                 locale,
                 article_id,
             )
-            return _public_content_hub_bundle(bundle, article)
+            published = _public_content_hub_bundle(bundle, article)
+            if not shared or not published:
+                return published
+            variables = published.get("variables", {})
+            content = _shared_zoosite_content(variables.get("articleContent"))
+            seo = published.get("seo", {})
+            return {"variables": {"articleContent": content}, "seo": {
+                "title": seo.get("title"),
+                "description": seo.get("description"),
+                "canonical": article.get("canonicalPath") or normalized_path,
+                "robots": "noindex,follow",
+            }} if content else None
     return None
 
 
@@ -1093,16 +1214,38 @@ def _merge_content_hub_runtime_indexes(
     if not hubs:
         return site_config
     has_metadata_binding = bool(_content_hub_table_name(environment))
-    if not has_metadata_binding and not any("localePolicy" in hub for hub in hubs):
+    if not has_metadata_binding and not any("localePolicy" in hub or hub.get("hubId") == SHARED_ZOOSITE_HUB for hub in hubs):
         return site_config
 
     enriched = copy.deepcopy(site_config)
-    enriched["runtime"]["contentHubs"] = copy.deepcopy(hubs)
+    domain = normalize_domain(site_config.get("domain"))
+    enriched["runtime"]["contentHubs"] = [
+        copy.deepcopy(hub) for hub in hubs
+        if hub.get("hubId") != SHARED_ZOOSITE_HUB
+        or domain == SHARED_ZOOSITE_OWNER
+        or _is_shared_zoosite_blog(domain, hub)
+    ]
     enriched_hubs = enriched["runtime"]["contentHubs"]
     for hub in enriched_hubs:
         if not isinstance(hub, dict):
             continue
+        shared = _is_shared_zoosite_blog(domain, hub)
         published_locales_only = _content_hub_published_locales_only(hub)
+        if shared:
+            owner_hub = _shared_zoosite_owner_hub(environment)
+            owner_articles = (owner_hub or {}).get("publicArticles")
+            hub["publicArticles"] = [
+                item for item in (owner_articles if isinstance(owner_articles, list) else [])
+                if isinstance(item, dict) and item.get("status") == "published"
+                and item.get("visibility", "public") == "public"
+                and re.fullmatch(r"/blog/[a-z0-9-]+/[a-z0-9-]+", str(item.get("path", "")))
+            ]
+            hub["publicTaxonomy"] = []
+            if not owner_hub or not has_metadata_binding:
+                hub["publicArticles"] = [] if published_locales_only else [
+                    _shared_zoosite_article(item) for item in hub["publicArticles"]
+                ]
+                continue
         if published_locales_only:
             # The dynamic index is authoritative, including when its binding
             # is absent. Static data cannot restore an unpublished language.
@@ -1141,7 +1284,12 @@ def _merge_content_hub_runtime_indexes(
             + normalized_existing_articles,
             ("articleId",),
         )
-        if merged_articles or published_locales_only:
+        if shared:
+            merged_articles = [
+                _shared_zoosite_article(item) for item in merged_articles
+                if re.fullmatch(r"/blog/[a-z0-9-]+/[a-z0-9-]+", str(item.get("path", "")))
+            ]
+        if merged_articles or published_locales_only or shared:
             hub["publicArticles"] = merged_articles
 
         dynamic_taxonomy = [
@@ -1359,6 +1507,8 @@ def _article_canonical_url(site_config: Optional[Dict[str, Any]], article: Dict[
     path = _safe_content_hub_path(article.get("canonicalPath")) or _safe_content_hub_path(article.get("path"))
     if not path:
         return None
+    if _has_shared_zoosite_blog(site_config, path):
+        return f"https://{SHARED_ZOOSITE_OWNER}{path}"
     seo = _site_seo_config(site_config)
     origin = str(seo.get("canonicalOrigin") or "").strip().rstrip("/")
     if not origin.startswith("https://"):
@@ -1403,6 +1553,8 @@ def _absolute_content_hub_canonical(site_config: Optional[Dict[str, Any]], canon
     path = _safe_content_hub_path(canonical)
     if not path:
         return None
+    if _has_shared_zoosite_blog(site_config, path):
+        return f"https://{SHARED_ZOOSITE_OWNER}{path}"
     seo = _site_seo_config(site_config)
     origin = str(seo.get("canonicalOrigin") or "").strip().rstrip("/")
     if not origin.startswith("https://"):
@@ -2474,6 +2626,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 route = _resolve_route(published_metadata, site_config, "/404")
             else:
                 article_bundle = _content_hub_bundle_for_path(site_config, path, lang, environment)
+                if not article_bundle and _has_shared_zoosite_blog(site_config, path):
+                    current = (_content_hub_public_variables(site_config, path) or {}).get("currentArticle", {})
+                    if not current.get("articleContent"):
+                        page_id = _resolve_not_found_page_id(published_metadata, site_config)
+                        should_render_not_found = True
+                        route = _resolve_route(published_metadata, site_config, "/404")
 
         if not should_render_not_found and _content_hub_taxonomy_route(site_config, path):
             if not _content_hub_public_taxonomy_exists(site_config, path):
