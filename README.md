@@ -272,6 +272,16 @@ sites/{domain}/versions/{versionId}/
 
 Shared domain-level files are optional. When they exist, the Lambda merges them first and then applies page-level overrides.
 
+### ZooBeriah Systems blog
+
+The ZooBeriah Systems draft uses the published Zoositioweb catalog on `/blog`
+and reads individual articles on `/blog/:categorySlug/:articleSlug`. Runtime
+Read resolves the source through the Zoositioweb published pointer in the same
+environment. It accepts only the matching ZooBeriah domain and the authorized
+`zoosite-main` hub. Article pages use the original Zoositioweb canonical URL
+and send `noindex,follow`. The Zoositioweb administrator and ZooBlog CLI manage
+the source articles.
+
 
 ## THN production promotion and reviewed activation
 
