@@ -70,6 +70,24 @@ class SharedBlogTest(unittest.TestCase):
         self.assertEqual(result["runtime"]["contentHubs"], [])
         query.assert_not_called()
 
+    def test_published_only_reader_does_not_restore_unbound_owner_articles(self):
+        cfg = {"domain": READER, "runtime": {"contentHubs": [{**HUB, "localePolicy": "published-only"}]}}
+        with patch.object(runtime, "_shared_zoosite_owner_hub", return_value={"publicArticles": [{
+            **ARTICLE, "locale": "es", "articleContent": {"html": "<p>Guía en español</p>"},
+        }]}), patch.object(runtime, "_content_hub_table_name", return_value=""):
+            result = runtime._merge_content_hub_runtime_indexes(cfg, "en", "test")
+        self.assertEqual(result["runtime"]["contentHubs"][0]["publicArticles"], [])
+
+    def test_shared_article_rebases_embed_sources_in_both_body_formats(self):
+        html = "<p><img src='/media/guia.webp'><a href='/blog/web/otro'>Otro artículo</a></p>"
+        self.assertEqual(runtime._shared_zoosite_content({"html": html}), {
+            "html": html.replace("'/media/guia.webp'", f"'https://{OWNER}/media/guia.webp'"),
+        })
+        ops = [{"insert": {"image": "/blog/media/guia.webp"}}, {"insert": {"image": "//media.example/guia.webp"}}]
+        self.assertEqual(runtime._shared_zoosite_content({"ops": ops}), {"ops": [
+            {"insert": {"image": f"https://{OWNER}/blog/media/guia.webp"}}, ops[1],
+        ]})
+
     def test_article_reads_original_public_bundle_before_projecting_reader_content(self):
         cfg = {"domain": READER, "runtime": {"contentHubs": [
             {**HUB, "publicArticles": [ARTICLE]},

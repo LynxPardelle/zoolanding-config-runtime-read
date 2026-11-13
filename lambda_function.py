@@ -458,11 +458,16 @@ def _shared_zoosite_owner_hub(environment: str) -> Optional[Dict[str, Any]]:
     ), None)
 
 
-def _shared_zoosite_link(value: Any) -> Any:
+def _shared_zoosite_asset(value: Any) -> Any:
     if isinstance(value, str) and value.startswith("/") and not value.startswith("//") and "\\" not in value:
-        if not value.startswith("/blog/") and value != "/blog":
-            return f"https://{SHARED_ZOOSITE_OWNER}{value}"
+        return f"https://{SHARED_ZOOSITE_OWNER}{value}"
     return value
+
+
+def _shared_zoosite_link(value: Any) -> Any:
+    if isinstance(value, str) and (value.startswith("/blog/") or value == "/blog"):
+        return value
+    return _shared_zoosite_asset(value)
 
 
 def _shared_zoosite_content(content: Any) -> Any:
@@ -475,13 +480,24 @@ def _shared_zoosite_content(content: Any) -> Any:
         return content
     ops = content.get("ops")
     for op in ops if isinstance(ops, list) else []:
-        attributes = op.get("attributes") if isinstance(op, dict) else None
+        if not isinstance(op, dict):
+            continue
+        attributes = op.get("attributes")
         if isinstance(attributes, dict) and "link" in attributes:
             attributes["link"] = _shared_zoosite_link(attributes["link"])
+        insert = op.get("insert")
+        if isinstance(insert, dict) and "image" in insert:
+            insert["image"] = _shared_zoosite_asset(insert["image"])
     if isinstance(content.get("html"), str):
         content["html"] = re.sub(
             r"""(\shref\s*=\s*)(["'])([^"']*)\2""",
             lambda match: f"{match[1]}{match[2]}{_shared_zoosite_link(match[3])}{match[2]}",
+            content["html"],
+            flags=re.IGNORECASE,
+        )
+        content["html"] = re.sub(
+            r"""(<img\b[^<>]*?\ssrc\s*=\s*)(["'])([^"']*)\2""",
+            lambda match: f"{match[1]}{match[2]}{_shared_zoosite_asset(match[3])}{match[2]}",
             content["html"],
             flags=re.IGNORECASE,
         )
@@ -496,8 +512,8 @@ def _shared_zoosite_article(article: Dict[str, Any]) -> Dict[str, Any]:
     article["robots"] = "noindex,follow"
     if "articleContent" in article:
         article["articleContent"] = _shared_zoosite_content(article["articleContent"])
-    if str(article.get("imageSrc") or "").startswith("/"):
-        article["imageSrc"] = f"https://{SHARED_ZOOSITE_OWNER}{article['imageSrc']}"
+    if "imageSrc" in article:
+        article["imageSrc"] = _shared_zoosite_asset(article["imageSrc"])
     return article
 
 
@@ -1214,6 +1230,7 @@ def _merge_content_hub_runtime_indexes(
         if not isinstance(hub, dict):
             continue
         shared = _is_shared_zoosite_blog(domain, hub)
+        published_locales_only = _content_hub_published_locales_only(hub)
         if shared:
             owner_hub = _shared_zoosite_owner_hub(environment)
             owner_articles = (owner_hub or {}).get("publicArticles")
@@ -1225,9 +1242,10 @@ def _merge_content_hub_runtime_indexes(
             ]
             hub["publicTaxonomy"] = []
             if not owner_hub or not has_metadata_binding:
-                hub["publicArticles"] = [_shared_zoosite_article(item) for item in hub["publicArticles"]]
+                hub["publicArticles"] = [] if published_locales_only else [
+                    _shared_zoosite_article(item) for item in hub["publicArticles"]
+                ]
                 continue
-        published_locales_only = _content_hub_published_locales_only(hub)
         if published_locales_only:
             # The dynamic index is authoritative, including when its binding
             # is absent. Static data cannot restore an unpublished language.
