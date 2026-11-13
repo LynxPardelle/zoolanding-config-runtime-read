@@ -508,13 +508,25 @@ def _shared_zoosite_article(article: Dict[str, Any]) -> Dict[str, Any]:
     article = _project_public_object(article, (
         "articleId", "locale", "status", "title", "path", "publishedAt", "summary", "categorySlug", "tags",
         "updatedAt", "canonicalPath", "articleContent", "imageSrc", "imageAlt", "authorLabel",
+        "robots", "primarySite",
     ))
-    article["robots"] = "noindex,follow"
     if "articleContent" in article:
         article["articleContent"] = _shared_zoosite_content(article["articleContent"])
     if "imageSrc" in article:
         article["imageSrc"] = _shared_zoosite_asset(article["imageSrc"])
     return article
+
+
+def _zoosite_article_delivery(article: Dict[str, Any], domain: str) -> Dict[str, Any]:
+    if article.get("status") != "published" or article.get("visibility", "public") != "public":
+        return article
+    if not re.fullmatch(r"/blog/[a-z0-9-]+/[a-z0-9-]+", str(article.get("path", ""))):
+        return article
+    primary = SHARED_ZOOSITE_OWNER if article.get("primarySite") == SHARED_ZOOSITE_OWNER else SHARED_ZOOSITE_READER
+    robots = article.get("robots")
+    if robots not in ("noindex,follow", "noindex,nofollow"):
+        robots = "index,follow" if domain == primary else "noindex,follow"
+    return {**article, "primarySite": primary, "robots": robots}
 
 
 def _safe_content_hub_timestamp(value: Any) -> str:
@@ -833,6 +845,10 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
         summary["canonicalPath"] = path
     if article_content:
         summary["articleContent"] = article_content
+    if hub.get("hubId") == SHARED_ZOOSITE_HUB and hub.get("ownerDraftDomain") == SHARED_ZOOSITE_OWNER:
+        published_site = item.get("publishedPrimarySite")
+        if published_site in (SHARED_ZOOSITE_OWNER, SHARED_ZOOSITE_READER):
+            summary["primarySite"] = published_site
     if image_src:
         summary["imageSrc"] = image_src
         summary["imageAlt"] = image_alt or title
@@ -1124,7 +1140,7 @@ def _content_hub_bundle_for_path(
                 "title": seo.get("title"),
                 "description": seo.get("description"),
                 "canonical": article.get("canonicalPath") or normalized_path,
-                "robots": "noindex,follow",
+                "robots": article.get("robots"),
             }} if content else None
     return None
 
@@ -1230,6 +1246,9 @@ def _merge_content_hub_runtime_indexes(
         if not isinstance(hub, dict):
             continue
         shared = _is_shared_zoosite_blog(domain, hub)
+        zoosite_primary = domain == hub.get("ownerDraftDomain") == SHARED_ZOOSITE_OWNER and (
+            hub.get("hubId") == SHARED_ZOOSITE_HUB and hub.get("source") == "primary"
+        )
         published_locales_only = _content_hub_published_locales_only(hub)
         if shared:
             owner_hub = _shared_zoosite_owner_hub(environment)
@@ -1243,7 +1262,7 @@ def _merge_content_hub_runtime_indexes(
             hub["publicTaxonomy"] = []
             if not owner_hub or not has_metadata_binding:
                 hub["publicArticles"] = [] if published_locales_only else [
-                    _shared_zoosite_article(item) for item in hub["publicArticles"]
+                    _shared_zoosite_article(_zoosite_article_delivery(item, domain)) for item in hub["publicArticles"]
                 ]
                 continue
         if published_locales_only:
@@ -1256,6 +1275,10 @@ def _merge_content_hub_runtime_indexes(
                 hub["publicTaxonomy"] = [item for item in hub["publicTaxonomy"]
                     if isinstance(item, dict) and item.get("locale") == _content_hub_locale(hub, lang)]
         if not has_metadata_binding:
+            if zoosite_primary and isinstance(hub.get("publicArticles"), list):
+                hub["publicArticles"] = [
+                    _zoosite_article_delivery(item, domain) for item in hub["publicArticles"] if isinstance(item, dict)
+                ]
             continue
         hub_id = _safe_content_hub_id(hub.get("hubId"))
         if not hub_id:
@@ -1284,6 +1307,8 @@ def _merge_content_hub_runtime_indexes(
             + normalized_existing_articles,
             ("articleId",),
         )
+        if shared or zoosite_primary:
+            merged_articles = [_zoosite_article_delivery(item, domain) for item in merged_articles]
         if shared:
             merged_articles = [
                 _shared_zoosite_article(item) for item in merged_articles
@@ -1504,6 +1529,12 @@ def _site_seo_config(site_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _article_canonical_url(site_config: Optional[Dict[str, Any]], article: Dict[str, Any]) -> Optional[str]:
+    domain = normalize_domain((site_config or {}).get("domain"))
+    primary = article.get("primarySite")
+    article_path = _safe_content_hub_path(article.get("path"))
+    if (primary in (SHARED_ZOOSITE_OWNER, SHARED_ZOOSITE_READER) and article_path
+            and (domain == SHARED_ZOOSITE_OWNER or _has_shared_zoosite_blog(site_config, article_path))):
+        return f"https://{primary}{article_path}"
     path = _safe_content_hub_path(article.get("canonicalPath")) or _safe_content_hub_path(article.get("path"))
     if not path:
         return None
@@ -1567,6 +1598,7 @@ def _merge_content_hub_bundle_page_config_seo(
     page_config: Optional[Dict[str, Any]],
     site_config: Optional[Dict[str, Any]],
     article_bundle: Optional[Dict[str, Any]],
+    article: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     bundle_seo = article_bundle.get("seo") if isinstance(article_bundle, dict) else None
     if not isinstance(page_config, dict) or not isinstance(bundle_seo, dict):
@@ -1580,6 +1612,9 @@ def _merge_content_hub_bundle_page_config_seo(
     description = _safe_content_hub_text(bundle_seo.get("description"), 320)
     canonical = _absolute_content_hub_canonical(site_config, bundle_seo.get("canonical"))
     robots = _safe_content_hub_text(bundle_seo.get("robots"), 160)
+    if article and article.get("primarySite") in (SHARED_ZOOSITE_OWNER, SHARED_ZOOSITE_READER):
+        canonical = _article_canonical_url(site_config, article)
+        robots = article.get("robots")
 
     if title:
         seo["title"] = f"{title} | {site_name}" if site_name and site_name not in title else title
@@ -2419,6 +2454,7 @@ def _published_bundle(
         page_config,
         payloads["siteConfig"],
         article_bundle,
+        _content_hub_current_article(variables_payload),
     )
     components_payload = _merge_content_hub_bundle_components(
         _merge_components(domain, page_id, payloads["sharedComponents"], payloads["pageComponents"]),
