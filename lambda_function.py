@@ -412,6 +412,10 @@ def _runtime_content_hubs(site_config: Optional[Dict[str, Any]]) -> list[Dict[st
 SHARED_ZOOSITE_HUB = "zoosite-main"
 SHARED_ZOOSITE_OWNER = "zoositioweb.com.mx"
 SHARED_ZOOSITE_READER = "zooberiahsystems.com"
+SHARED_ZOOSITE_READER_PRIMARY_ARTICLE_IDS = frozenset({
+    "art_20260620_blog_builder",
+    "art_1783073141_bienvenida-al-blog-zoositioweb",
+})
 
 
 def _is_shared_zoosite_blog(domain: str, hub: Dict[str, Any]) -> bool:
@@ -522,7 +526,13 @@ def _zoosite_article_delivery(article: Dict[str, Any], domain: str) -> Dict[str,
         return article
     if not re.fullmatch(r"/blog/[a-z0-9-]+/[a-z0-9-]+", str(article.get("path", ""))):
         return article
-    primary = SHARED_ZOOSITE_OWNER if article.get("primarySite") == SHARED_ZOOSITE_OWNER else SHARED_ZOOSITE_READER
+    primary = article.get("primarySite")
+    if primary not in (SHARED_ZOOSITE_OWNER, SHARED_ZOOSITE_READER):
+        primary = (
+            SHARED_ZOOSITE_READER
+            if article.get("articleId") in SHARED_ZOOSITE_READER_PRIMARY_ARTICLE_IDS
+            else SHARED_ZOOSITE_OWNER
+        )
     directives = str(article.get("robots") or "").lower().split(",")
     index = "noindex" if domain != primary or "noindex" in directives else "index"
     follow = "nofollow" if "nofollow" in directives else "follow"
