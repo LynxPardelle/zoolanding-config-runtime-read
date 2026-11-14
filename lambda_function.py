@@ -523,9 +523,10 @@ def _zoosite_article_delivery(article: Dict[str, Any], domain: str) -> Dict[str,
     if not re.fullmatch(r"/blog/[a-z0-9-]+/[a-z0-9-]+", str(article.get("path", ""))):
         return article
     primary = SHARED_ZOOSITE_OWNER if article.get("primarySite") == SHARED_ZOOSITE_OWNER else SHARED_ZOOSITE_READER
-    robots = article.get("robots")
-    if robots not in ("noindex,follow", "noindex,nofollow"):
-        robots = "index,follow" if domain == primary else "noindex,follow"
+    directives = str(article.get("robots") or "").lower().split(",")
+    index = "noindex" if domain != primary or "noindex" in directives else "index"
+    follow = "nofollow" if "nofollow" in directives else "follow"
+    robots = f"{index},{follow}"
     return {**article, "primarySite": primary, "robots": robots}
 
 
@@ -799,7 +800,7 @@ def _content_hub_article_summary(item: Dict[str, Any], hub: Dict[str, Any], loca
     category_slug = _content_hub_taxonomy_slug(source.get("category") or source.get("categorySlug"))
     tags = _content_hub_tags(source.get("tags"))
     robots = str(source.get("robots") or fallback.get("robots") or "index,follow").strip()
-    if robots not in {"index,follow", "noindex,follow", "noindex,nofollow"}:
+    if robots not in {"index,follow", "index,nofollow", "noindex,follow", "noindex,nofollow"}:
         robots = "index,follow"
 
     summary: Dict[str, Any] = {
@@ -1140,7 +1141,7 @@ def _content_hub_bundle_for_path(
                 "title": seo.get("title"),
                 "description": seo.get("description"),
                 "canonical": article.get("canonicalPath") or normalized_path,
-                "robots": article.get("robots"),
+                "robots": seo.get("robots"),
             }} if content else None
     return None
 
@@ -1614,7 +1615,11 @@ def _merge_content_hub_bundle_page_config_seo(
     robots = _safe_content_hub_text(bundle_seo.get("robots"), 160)
     if article and article.get("primarySite") in (SHARED_ZOOSITE_OWNER, SHARED_ZOOSITE_READER):
         canonical = _article_canonical_url(site_config, article)
-        robots = article.get("robots")
+        directives = {directive.strip().lower() for value in (robots, article.get("robots")) if isinstance(value, str)
+                      for directive in value.split(",")}
+        index = "noindex" if directives & {"noindex", "none"} else "index"
+        follow = "nofollow" if directives & {"nofollow", "none"} else "follow"
+        robots = f"{index},{follow}"
 
     if title:
         seo["title"] = f"{title} | {site_name}" if site_name and site_name not in title else title
