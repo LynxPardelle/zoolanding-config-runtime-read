@@ -278,8 +278,8 @@ The ZooBeriah Systems draft uses the published Zoositioweb catalog on `/blog`
 and reads individual articles on `/blog/:categorySlug/:articleSlug`. Runtime
 Read resolves the source through the Zoositioweb published pointer in the same
 environment. It accepts only the matching ZooBeriah domain and the authorized
-`zoosite-main` hub. Article pages use the original Zoositioweb canonical URL
-and send `noindex,follow`. The Zoositioweb administrator and ZooBlog CLI manage
+`zoosite-main` hub. Article pages use their selected primary-site canonical URL
+on the primary site. ZooBeriah is the default. The shared copy sends a noindex directive. The Zoositioweb administrator and ZooBlog CLI manage
 the source articles.
 
 
