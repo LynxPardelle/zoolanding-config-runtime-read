@@ -56,10 +56,36 @@ class SharedBlogTest(unittest.TestCase):
             result = runtime._merge_content_hub_runtime_indexes(cfg, "es", "test")
         articles = result["runtime"]["contentHubs"][0]["publicArticles"]
         self.assertEqual([item["articleId"] for item in articles], ["art_public", "art_static"])
-        self.assertTrue(all(item["robots"] == "noindex,follow" for item in articles))
+        self.assertTrue(all(item["robots"] == "index,follow" for item in articles))
+        self.assertTrue(all(item["primarySite"] == READER for item in articles))
         self.assertEqual(articles[1]["articleContent"], static["articleContent"])
         self.assertEqual(load.call_args.args[1:], ("test-source", f"{OWNER}/site-config.json"))
         self.assertTrue(all(call.args[-1] == "test" for call in query.call_args_list))
+
+    def test_primary_site_applies_to_both_deliveries_and_preserves_noindex(self):
+        for domain, hub in ((OWNER, {**HUB, "source": "primary"}), (READER, HUB)):
+            for site in (None, OWNER, READER, "unrelated.example"):
+                with self.subTest(domain=domain, primary_site=site):
+                    cfg = {"domain": domain, "runtime": {"contentHubs": [hub]}}
+                    with patch.object(runtime, "_shared_zoosite_owner_hub", return_value=hub), patch.object(
+                        runtime, "_content_hub_table_name", return_value="table"
+                    ), patch.object(runtime, "_query_content_hub_metadata", side_effect=lambda _hub, kind, _env: [
+                        {**ARTICLE, "publishedPrimarySite": site}
+                    ] if kind == "ARTICLE#" else []):
+                        enriched = runtime._merge_content_hub_runtime_indexes(cfg, "es", "production")
+                    article = enriched["runtime"]["contentHubs"][0]["publicArticles"][0]
+                    primary = OWNER if site == OWNER else READER
+                    robots = "index,follow" if primary == domain else "noindex,follow"
+                    self.assertEqual(article["primarySite"], primary)
+                    self.assertEqual(article["robots"], robots)
+                    page = runtime._merge_content_hub_bundle_page_config_seo(
+                        {"seo": {}}, enriched, {"seo": {"canonical": PATH, "robots": "index,follow"}}, article,
+                    )
+                    self.assertEqual(page["seo"]["canonical"], f"https://{primary}{PATH}")
+                    self.assertEqual(page["seo"]["robots"], {"default": robots})
+
+        restricted = runtime._zoosite_article_delivery({**ARTICLE, "robots": "noindex,nofollow"}, READER)
+        self.assertEqual(restricted["robots"], "noindex,nofollow")
 
     def test_unauthorized_domain_cannot_subscribe(self):
         cfg = {"domain": "other.example", "runtime": {"contentHubs": [{**HUB, "publicArticles": [ARTICLE]}]}}
@@ -114,8 +140,7 @@ class SharedBlogTest(unittest.TestCase):
         ops = result["variables"]["articleContent"]["ops"]
         self.assertEqual(ops[0]["attributes"]["link"], "/blog/web/otro")
         self.assertEqual(ops[1]["attributes"]["link"], f"https://{OWNER}/contacto")
-        page = runtime._merge_content_hub_bundle_page_config_seo(
-            {"seo": {}}, cfg, result,
-        )
-        self.assertEqual(page["seo"]["canonical"], f"https://{OWNER}{PATH}")
-        self.assertEqual(page["seo"]["robots"], {"default": "noindex,follow"})
+        article = {"primarySite": READER, "path": PATH, "robots": "index,follow"}
+        page = runtime._merge_content_hub_bundle_page_config_seo({"seo": {}}, cfg, result, article)
+        self.assertEqual(page["seo"]["canonical"], f"https://{READER}{PATH}")
+        self.assertEqual(page["seo"]["robots"], {"default": "index,follow"})
