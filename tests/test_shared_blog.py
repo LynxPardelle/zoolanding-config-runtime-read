@@ -86,6 +86,11 @@ class SharedBlogTest(unittest.TestCase):
 
         restricted = runtime._zoosite_article_delivery({**ARTICLE, "robots": "noindex,nofollow"}, READER)
         self.assertEqual(restricted["robots"], "noindex,nofollow")
+        self.assertEqual(runtime._zoosite_article_delivery({**ARTICLE, "robots": "index,nofollow"}, OWNER)["robots"], "noindex,nofollow")
+        bundle = {"seo": {"canonical": PATH, "robots": "noindex,nofollow"}}
+        article = {**ARTICLE, "primarySite": READER, "robots": "index,follow"}
+        page = runtime._merge_content_hub_bundle_page_config_seo({"seo": {}}, {"domain": READER}, bundle, article)
+        self.assertEqual(page["seo"]["robots"], {"default": "noindex,nofollow"})
 
     def test_unauthorized_domain_cannot_subscribe(self):
         cfg = {"domain": "other.example", "runtime": {"contentHubs": [{**HUB, "publicArticles": [ARTICLE]}]}}
