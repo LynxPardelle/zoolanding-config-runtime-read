@@ -56,8 +56,8 @@ class SharedBlogTest(unittest.TestCase):
             result = runtime._merge_content_hub_runtime_indexes(cfg, "es", "test")
         articles = result["runtime"]["contentHubs"][0]["publicArticles"]
         self.assertEqual([item["articleId"] for item in articles], ["art_public", "art_static"])
-        self.assertTrue(all(item["robots"] == "index,follow" for item in articles))
-        self.assertTrue(all(item["primarySite"] == READER for item in articles))
+        self.assertTrue(all(item["robots"] == "noindex,follow" for item in articles))
+        self.assertTrue(all(item["primarySite"] == OWNER for item in articles))
         self.assertEqual(articles[1]["articleContent"], static["articleContent"])
         self.assertEqual(load.call_args.args[1:], ("test-source", f"{OWNER}/site-config.json"))
         self.assertTrue(all(call.args[-1] == "test" for call in query.call_args_list))
@@ -74,7 +74,7 @@ class SharedBlogTest(unittest.TestCase):
                     ] if kind == "ARTICLE#" else []):
                         enriched = runtime._merge_content_hub_runtime_indexes(cfg, "es", "production")
                     article = enriched["runtime"]["contentHubs"][0]["publicArticles"][0]
-                    primary = OWNER if site == OWNER else READER
+                    primary = READER if site == READER else OWNER
                     robots = "index,follow" if primary == domain else "noindex,follow"
                     self.assertEqual(article["primarySite"], primary)
                     self.assertEqual(article["robots"], robots)
@@ -86,11 +86,39 @@ class SharedBlogTest(unittest.TestCase):
 
         restricted = runtime._zoosite_article_delivery({**ARTICLE, "robots": "noindex,nofollow"}, READER)
         self.assertEqual(restricted["robots"], "noindex,nofollow")
-        self.assertEqual(runtime._zoosite_article_delivery({**ARTICLE, "robots": "index,nofollow"}, OWNER)["robots"], "noindex,nofollow")
+        nofollow = {**ARTICLE, "robots": "index,nofollow"}
+        self.assertEqual(runtime._zoosite_article_delivery(nofollow, OWNER)["robots"], "index,nofollow")
+        self.assertEqual(runtime._zoosite_article_delivery(nofollow, READER)["robots"], "noindex,nofollow")
         bundle = {"seo": {"canonical": PATH, "robots": "noindex,nofollow"}}
         article = {**ARTICLE, "primarySite": READER, "robots": "index,follow"}
         page = runtime._merge_content_hub_bundle_page_config_seo({"seo": {}}, {"domain": READER}, bundle, article)
         self.assertEqual(page["seo"]["robots"], {"default": "noindex,nofollow"})
+
+    def test_scoped_primary_site_moves_only_the_two_reviewed_articles(self):
+        targets = {
+            "art_20260620_blog_builder": "/blog/web/blog-builder-seo",
+            "art_1783073141_bienvenida-al-blog-zoositioweb": "/blog/web/bienvenida-al-blog-zoositioweb",
+        }
+        for domain, hub in ((OWNER, {**HUB, "source": "primary"}), (READER, HUB)):
+            for article_id, path in {**targets, "art_other": PATH}.items():
+                with self.subTest(domain=domain, article_id=article_id):
+                    article = {**ARTICLE, "articleId": article_id, "path": path}
+                    projected = runtime._zoosite_article_delivery(article, domain)
+                    primary = READER if article_id in targets else OWNER
+                    robots = "index,follow" if primary == domain else "noindex,follow"
+                    page = runtime._merge_content_hub_bundle_page_config_seo(
+                        {"seo": {}}, {"domain": domain, "runtime": {"contentHubs": [hub]}},
+                        {"seo": {"canonical": path, "robots": "index,follow"}}, projected,
+                    )
+                    self.assertEqual(projected["primarySite"], primary)
+                    self.assertEqual(projected["robots"], robots)
+                    self.assertEqual(page["seo"]["canonical"], f"https://{primary}{path}")
+                    self.assertEqual(page["seo"]["robots"], {"default": robots})
+
+        for article_id, path in targets.items():
+            article = {**ARTICLE, "articleId": article_id, "path": path, "primarySite": OWNER}
+            self.assertEqual(runtime._zoosite_article_delivery(article, OWNER)["robots"], "index,follow")
+            self.assertEqual(runtime._zoosite_article_delivery(article, READER)["robots"], "noindex,follow")
 
     def test_unauthorized_domain_cannot_subscribe(self):
         cfg = {"domain": "other.example", "runtime": {"contentHubs": [{**HUB, "publicArticles": [ARTICLE]}]}}
