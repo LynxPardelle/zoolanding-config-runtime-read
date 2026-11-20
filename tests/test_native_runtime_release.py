@@ -136,6 +136,7 @@ class NativeReleaseReviewTests(unittest.TestCase):
             if args[:2] == ("cloudformation", "describe-stack-resource"): return {"StackResourceDetail": {"PhysicalResourceId": function}}
             if args[:2] == ("lambda", "get-alias"): return {"FunctionVersion": "4", "RevisionId": "same"}
             if args[:2] == ("lambda", "get-function"):
+                self.assertEqual(args[-2:], ("--qualifier", "4"))
                 return {"Configuration": {"State": "Active", "LastUpdateStatus": "Successful",
                                           "CodeSha256": base64.b64encode(hashlib.sha256(package).digest()).decode(),
                                           "RevisionId": "same"},

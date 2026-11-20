@@ -39,7 +39,7 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 
 ## ZooBeriah catalog
 
-The published bundles for `zooberiahsystems.com/sitios-web` and `/productos` can overlay an approved source on the authored catalog seed. `catalog_overlay.py` owns the runtime source registrations, scoped to one stack environment, canonical domain, entry ID and public card ID. TEST registers `zoositioweb.com.mx` for the existing ZooSitioWeb website card. Production requires a reviewed registration after the TEST pilot.
+The published bundles for `zooberiahsystems.com/sitios-web` and `/productos` can overlay an approved source on the authored catalog seed. `catalog_overlay.py` owns the runtime source registrations, scoped to one stack environment, canonical domain, entry ID and public card ID. TEST and production register `zoositioweb.com.mx` for the existing ZooSitioWeb website card. The production overlay takes effect after Authoring enrolls the exact production publisher and records a current projection.
 
 Runtime Read uses strongly consistent `GetItem` reads on its own registry table. It checks the current published pointer and the entries digest before using a projection. If a projection is missing, stale, legacy, or unavailable, the bundle uses the authored seed. A current declared snapshot can replace or retire the registered card. The same list feeds the page components, result count, search and `ItemList`. The products page activates only after its `productsList` loop is published, and its section IDs follow the list. Other routes use their existing payloads.
 
@@ -388,11 +388,17 @@ version list and `live` alias binding, so a change to those bindings still stops
 promotion. The historical [identical-package release specification](docs/superpowers/specs/2026-09-28-runtime-identical-package-release.md)
 records the original stricter TEST policy before this narrowly bounded update.
 
-The TEST deployment role must be able to read the exact immutable version selected
-by `live` with `lambda:GetFunction`. A new published version can require a separately
-reviewed revision of the existing supplemental read policy. Verify effective IAM
-decisions for that exact qualifier and preserve all other policies and role trust;
-the native release operator does not automatically grant access to future versions.
+The TEST deployment role must be able to read the exact `live` alias with
+`lambda:GetFunction`. The TEST verifier requests that alias, requires its returned
+ARN to identify `live` and its numeric `Version` to match the initially read alias,
+and verifies the complete configuration, ZIP digest and published-version list.
+It rereads the complete alias after those checks; movement, revision, routing or
+metadata changes reject the snapshot, even if the alias returns to the same
+version. This permits a separately reviewed read policy for only the exact alias
+ARN, without guessing future version numbers or granting a wildcard. Verify the
+effective IAM decision and preserve all other policies and role trust. Production
+verification continues to read the numeric TEST version under its separate policy.
+The native release operator never changes IAM.
 
 If CloudFormation completes but the qualified read fails, verify the live alias,
 published code digest, and exact denied IAM action before starting recovery. A
