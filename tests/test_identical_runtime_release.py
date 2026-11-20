@@ -277,15 +277,19 @@ class TestBindingTests(unittest.TestCase):
                 "FunctionArn": function["FunctionArn"] + ":4"}
         alias = {"AliasArn": function["FunctionArn"] + ":live", "Name": "live", "FunctionVersion": "4", "RevisionId": "alias-revision"}
         versions = [{"Version": "3", "FunctionArn": function["FunctionArn"] + ":3", "CodeSha256": "retained-old"}, copy.deepcopy(live)]
+        live["FunctionArn"] = function["FunctionArn"] + ":live"
         snapshot = {"processed": before, "functions": [function], "identities": [
             {"LogicalResourceId": FUNCTION, "PhysicalResourceId": "retained", "ResourceType": "AWS::Lambda::Function"},
             {"LogicalResourceId": ALIAS, "PhysicalResourceId": function["FunctionArn"] + ":live", "ResourceType": "AWS::Lambda::Alias"},
             {"LogicalResourceId": OLD_VERSION, "PhysicalResourceId": function["FunctionArn"] + ":4", "ResourceType": "AWS::Lambda::Version"}]}
         return package, snapshot, live, alias, versions
 
-    def read(self, op, package, snapshot, live, alias, versions):
+    def read(self, op, package, snapshot, live, alias, versions, *, alias_reads=None, calls=None):
+        reads = iter(alias_reads) if alias_reads is not None else None
         def aws(*args):
-            if args[:2] == ("lambda", "get-alias"): return copy.deepcopy(alias)
+            if calls is not None: calls.append(args)
+            if args[:2] == ("lambda", "get-alias"):
+                return copy.deepcopy(next(reads) if reads is not None else alias)
             if args[:2] == ("lambda", "get-function"):
                 return {"Configuration": copy.deepcopy(live), "Code": {"Location": "https://awslambda-us-east-1-tasks.s3.us-east-1.amazonaws.com/sealed"}}
             if args[:2] == ("lambda", "list-versions-by-function"): return {"Versions": copy.deepcopy(versions)}
@@ -304,6 +308,45 @@ class TestBindingTests(unittest.TestCase):
         self.assertEqual(result["qualifiedConfiguration"], live)
         self.assertEqual(result["publishedVersions"], versions)
         self.assertEqual(result["qualifiedZipSha256"], hashlib.sha256(package).hexdigest())
+
+    def test_binding_reads_exact_alias_and_rechecks_after_zip_and_version_reads(self):
+        op = operator()
+        package, snapshot, live, alias, versions = self.fixture()
+        calls = []
+        result = self.read(op, package, snapshot, live, alias, versions, calls=calls)
+        self.assertEqual([call for call in calls if call[:2] == ("lambda", "get-function")],
+                         [("lambda", "get-function", "--function-name", "retained", "--qualifier", "live")])
+        alias_call = ("lambda", "get-alias", "--function-name", "retained", "--name", "live")
+        self.assertEqual(calls.count(alias_call), 2)
+        self.assertEqual(calls[-1], alias_call)
+        self.assertEqual(result["qualifiedConfiguration"]["Version"], alias["FunctionVersion"])
+        self.assertEqual(result["publishedVersions"], versions)
+
+    def test_binding_rejects_returned_alias_arn_or_numeric_version_mismatch(self):
+        for mutation in ("unqualified", "numeric-arn", "other-alias", "other-version", "version-type"):
+            op = operator()
+            package, snapshot, live, alias, versions = self.fixture()
+            if mutation == "unqualified": live["FunctionArn"] = snapshot["functions"][0]["FunctionArn"]
+            if mutation == "numeric-arn": live["FunctionArn"] = versions[-1]["FunctionArn"]
+            if mutation == "other-alias": live["FunctionArn"] = snapshot["functions"][0]["FunctionArn"] + ":other"
+            if mutation == "other-version": live["Version"] = "5"
+            if mutation == "version-type": live["Version"] = 4
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.read(op, package, snapshot, live, alias, versions)
+
+    def test_binding_rejects_alias_movement_or_metadata_change_during_read(self):
+        for mutation in ("version", "revision-same-version", "name", "arn", "routing", "description"):
+            op = operator()
+            package, snapshot, live, alias, versions = self.fixture()
+            moved = copy.deepcopy(alias)
+            if mutation == "version": moved["FunctionVersion"] = "5"
+            if mutation == "revision-same-version": moved["RevisionId"] = "changed-after-returning-to-same-version"
+            if mutation == "name": moved["Name"] = "other"
+            if mutation == "arn": moved["AliasArn"] += "-other"
+            if mutation == "routing": moved["RoutingConfig"] = {"AdditionalVersionWeights": {"5": 0.1}}
+            if mutation == "description": moved["Description"] = "changed"
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.read(op, package, snapshot, live, alias, versions, alias_reads=[alias, moved])
 
     def test_binding_rejects_config_routing_identity_health_and_bytes_mismatch(self):
         op = operator()
