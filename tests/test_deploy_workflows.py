@@ -351,6 +351,7 @@ class DeployWorkflowTests(unittest.TestCase):
                     "            .aws-sam/build/template.yaml\n"
                     "            .aws-sam/build/ConfigRuntimeReadFunction/lambda_function.py\n"
                     "            .aws-sam/build/ConfigRuntimeReadFunction/zoolanding_lambda_common.py\n"
+                    "            .aws-sam/build/ConfigRuntimeReadFunction/catalog_overlay.py\n"
                     "            .aws-sam/build-manifest.sha256"
                 )
                 self.assertIn(expected_artifact_paths, validate_section)

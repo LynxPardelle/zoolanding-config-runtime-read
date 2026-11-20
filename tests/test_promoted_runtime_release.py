@@ -19,10 +19,15 @@ class PromotedRuntimeReleaseTests(unittest.TestCase):
         spec.loader.exec_module(verifier)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            sources = {
+                "lambda_function.py": b"reviewed source",
+                "zoolanding_lambda_common.py": b"reviewed common",
+                "catalog_overlay.py": b"reviewed overlay",
+            }
             archive = io.BytesIO()
             with zipfile.ZipFile(archive, "w") as package:
-                package.writestr("lambda_function.py", b"reviewed source")
-                package.writestr("zoolanding_lambda_common.py", b"reviewed common")
+                for name, data in sources.items():
+                    package.writestr(name, data)
             root.joinpath("runtime-read.zip").write_bytes(archive.getvalue())
             code = base64.b64encode(hashlib.sha256(archive.getvalue()).digest()).decode()
             root.joinpath("lambda-code-sha256.txt").write_text(code + "\n", newline="\n")
@@ -33,9 +38,9 @@ class PromotedRuntimeReleaseTests(unittest.TestCase):
             self.addCleanup(root.parent.joinpath(root.name + '-manifest.sha256').unlink, missing_ok=True)
             before = root.joinpath("runtime-read.zip").read_bytes()
             self.assertEqual(verifier.verify_release(root, root.parent / (root.name + '-manifest.sha256'), hashlib.sha256(manifest).hexdigest(),
-                {"lambda_function.py":b"reviewed source","zoolanding_lambda_common.py":b"reviewed common"}), code)
+                sources), code)
             self.assertEqual(root.joinpath("runtime-read.zip").read_bytes(), before)
             root.joinpath("runtime-read.zip").write_bytes(before + b"tampered")
             with self.assertRaises(ValueError):
                 verifier.verify_release(root, root.parent / (root.name + '-manifest.sha256'), hashlib.sha256(manifest).hexdigest(),
-                    {"lambda_function.py":b"reviewed source","zoolanding_lambda_common.py":b"reviewed common"})
+                    sources)

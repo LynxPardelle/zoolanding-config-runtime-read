@@ -19,7 +19,7 @@ DEFAULT_RELEASE = PROJECT_ROOT / ".aws-sam" / "release"
 RELEASE_ZIP_NAME = "runtime-read.zip"
 RELEASE_TEMPLATE_NAME = "template.yaml"
 RELEASE_DIGEST_NAME = "lambda-code-sha256.txt"
-RUNTIME_FILES = (Path("lambda_function.py"), Path("zoolanding_lambda_common.py"))
+RUNTIME_FILES = (Path("lambda_function.py"), Path("zoolanding_lambda_common.py"), Path("catalog_overlay.py"))
 EXPECTED_FILES = {path.as_posix() for path in RUNTIME_FILES}
 EXPECTED_RELEASE_FILES = {
     RELEASE_ZIP_NAME,

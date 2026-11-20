@@ -16,7 +16,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "tools" / "build_lambda_artifact.py"
 STAGED_ARTIFACT = ROOT / ".build" / "runtime-read"
-EXPECTED_RUNTIME_FILES = {"lambda_function.py", "zoolanding_lambda_common.py"}
+EXPECTED_RUNTIME_FILES = {"lambda_function.py", "zoolanding_lambda_common.py", "catalog_overlay.py"}
 
 
 def load_builder_module():
@@ -144,7 +144,7 @@ class SamPackagingTests(unittest.TestCase):
 
         self.assertLessEqual(local_dependencies, EXPECTED_RUNTIME_FILES)
 
-    def test_builder_stages_only_the_two_runtime_files(self):
+    def test_builder_stages_only_the_runtime_files(self):
         result = self.run_builder()
 
         self.assertEqual(0, result.returncode, result.stderr)
@@ -324,7 +324,7 @@ class SamPackagingTests(unittest.TestCase):
 
         self.assertIn(".build/", gitignore)
         self.assertIn("`.build/runtime-read`", readme)
-        self.assertIn("only `lambda_function.py` and `zoolanding_lambda_common.py`", readme)
+        self.assertIn("only `lambda_function.py`, `zoolanding_lambda_common.py`, and `catalog_overlay.py`", readme)
 
 
 if __name__ == "__main__":
