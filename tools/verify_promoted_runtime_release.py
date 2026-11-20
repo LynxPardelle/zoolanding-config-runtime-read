@@ -10,7 +10,7 @@ import subprocess
 import zipfile
 
 FILES = {"template.yaml", "runtime-read.zip", "lambda-code-sha256.txt"}
-RUNTIME = {"lambda_function.py", "zoolanding_lambda_common.py"}
+RUNTIME = {"lambda_function.py", "zoolanding_lambda_common.py", "catalog_overlay.py"}
 
 
 def _reject():

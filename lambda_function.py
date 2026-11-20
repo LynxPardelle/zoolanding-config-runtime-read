@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import unquote, urlparse
 
+from catalog_overlay import CATALOG_DOMAIN, CATALOG_PAGES, apply_catalog_overlay
 from zoolanding_lambda_common import (
     alias_pk,
     bad_request,
@@ -2433,6 +2434,11 @@ def _validate_thn_protected_runtime(site_config: Dict[str, Any], environment: st
         raise ValueError("protected_runtime_profile_invalid")
 
 
+def _read_catalog_item(pk: str, sk: str) -> Optional[Dict[str, Any]]:
+    response = get_table(CONFIG_TABLE_NAME).get_item(Key={"pk": pk, "sk": sk}, ConsistentRead=True)
+    return response.get("Item")
+
+
 def _published_bundle(
     *,
     request_id: str,
@@ -2475,6 +2481,18 @@ def _published_bundle(
         _merge_components(domain, page_id, payloads["sharedComponents"], payloads["pageComponents"]),
         article_bundle,
     )
+    stack_environment = {"test": "test", "prod": "production", "production": "production"}.get(os.getenv("ENVIRONMENT_NAME", ""))
+    route_auth = route.get("auth") if isinstance(route, dict) else None
+    if (domain == CATALOG_DOMAIN and page_id in CATALOG_PAGES and path == f"/{page_id}"
+            and environment == stack_environment and not not_found_status
+            and (route_auth is None or isinstance(route_auth, dict) and route_auth.get("required") is not True)):
+        try:
+            variables_payload, page_config = apply_catalog_overlay(
+                environment, page_id, variables_payload, page_config, components_payload, _read_catalog_item,
+            )
+        except Exception:
+            # The authored payload stays available if an optional catalog read or validation fails.
+            log("WARN", "Catalog overlay unavailable", environment=environment, pageId=page_id)
     i18n_payload = _merge_content_hub_bundle_i18n(
         _merge_i18n(domain, page_id, lang, payloads["sharedI18n"], payloads["pageI18n"]),
         article_bundle,

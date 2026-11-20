@@ -37,6 +37,12 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 - Return a professional fallback bundle when the site is in `maintenance` or `suspended` state.
 - Return safe public content hub metadata for blog/article-style features.
 
+## ZooBeriah catalog
+
+The published bundles for `zooberiahsystems.com/sitios-web` and `/productos` can overlay an approved source on the authored catalog seed. `catalog_overlay.py` owns the runtime source registrations, scoped to one stack environment, canonical domain, entry ID and public card ID. TEST and production register `zoositioweb.com.mx` for the existing ZooSitioWeb website card. The production overlay takes effect after Authoring enrolls the exact production publisher and records a current projection.
+
+Runtime Read uses strongly consistent `GetItem` reads on its own registry table. It checks the current published pointer and the entries digest before using a projection. If a projection is missing, stale, legacy, or unavailable, the bundle uses the authored seed. A current declared snapshot can replace or retire the registered card. The same list feeds the page components, result count, search and `ItemList`. The products page activates only after its `productsList` loop is published, and its section IDs follow the list. Other routes use their existing payloads.
+
 ## AWS dependencies
 
 - DynamoDB table: `zoolanding-config-registry`
@@ -66,7 +72,7 @@ For SAM, IAM, parameter, or workflow changes, also run `sam validate` when SAM i
 
 Pushes to `dev` run CI only and do not deploy AWS infrastructure. Pushes to `test` and `main` trigger their environment-specific AWS deployment workflows. Use the workflow-guarded promotion path feature branch -> `dev` -> `test` -> `main`, and do not merge or deploy without explicit approval for the target environment. Plain `sam deploy` uses the default production-oriented profile; do not use it for exploratory validation.
 
-Test and production deployment workflows serialize the entire run by environment and Git ref. They do not cancel an in-progress run, because cancellation could interrupt a CloudFormation operation after it has started mutating infrastructure. A validation job without OIDC runs for each environment: it executes tests, restores a clean checkout of the exact `${{ github.sha }}` with persisted Git credentials disabled, stages `.build/runtime-read` with only `lambda_function.py` and `zoolanding_lambda_common.py`, and validates and builds with SAM CLI `1.163.0`. For the authorized TEST migration, validation also creates a deterministic, uncompressed `runtime-read.zip`, a derived release template whose `CodeUri` points to that file, and the base64 Lambda `CodeSha256`; it uploads only those three files and their SHA-256 manifest for one day. The TEST privileged job downloads that artifact by the ID emitted by the validation job in the same workflow run, verifies the manifest digest, every file hash, the exact file set, and the ZIP's Lambda digest, and does not check out or execute repository code. Immediately before AWS credentials are obtained, an inline pinned-action verifier repeats the full same-repository merged-PR check, including source/base branches and SHAs, parent order, event predecessor, and a final target-tip read. TEST deployment then uses the verified release template with explicit parameters that match `samconfig.toml` and verifies that the stable `live` alias resolves to an immutable version with the exact validated `CodeSha256`. The production workflow is intentionally unchanged by this TEST-only rollout and continues using its prior built-artifact path until separately authorized.
+Test and production deployment workflows serialize the entire run by environment and Git ref. They do not cancel an in-progress run, because cancellation could interrupt a CloudFormation operation after it has started mutating infrastructure. A validation job without OIDC runs for each environment: it executes tests, restores a clean checkout of the exact `${{ github.sha }}` with persisted Git credentials disabled, stages `.build/runtime-read` with only `lambda_function.py`, `zoolanding_lambda_common.py`, and `catalog_overlay.py`, and validates and builds with SAM CLI `1.163.0`. For the authorized TEST migration, validation also creates a deterministic, uncompressed `runtime-read.zip`, a derived release template whose `CodeUri` points to that file, and the base64 Lambda `CodeSha256`; it uploads only those three files and their SHA-256 manifest for one day. The TEST privileged job downloads that artifact by the ID emitted by the validation job in the same workflow run, verifies the manifest digest, every file hash, the exact file set, and the ZIP's Lambda digest, and does not check out or execute repository code. Immediately before AWS credentials are obtained, an inline pinned-action verifier repeats the full same-repository merged-PR check, including source/base branches and SHAs, parent order, event predecessor, and a final target-tip read. TEST deployment then uses the verified release template with explicit parameters that match `samconfig.toml` and verifies that the stable `live` alias resolves to an immutable version with the exact validated `CodeSha256`. The production workflow continues using its guarded built-artifact path.
 
 The shared source template remains on the existing unaliased SAM transform used by production. Only the TEST artifact packager derives the two-transform template and injects the `live` alias properties; the production workflow neither calls that packager nor consumes its output.
 
@@ -382,11 +388,28 @@ version list and `live` alias binding, so a change to those bindings still stops
 promotion. The historical [identical-package release specification](docs/superpowers/specs/2026-09-28-runtime-identical-package-release.md)
 records the original stricter TEST policy before this narrowly bounded update.
 
-The TEST deployment role must be able to read the exact immutable version selected
-by `live` with `lambda:GetFunction`. A new published version can require a separately
-reviewed revision of the existing supplemental read policy. Verify effective IAM
-decisions for that exact qualifier and preserve all other policies and role trust;
-the native release operator does not automatically grant access to future versions.
+The TEST deployment role must be able to read the exact `live` alias with
+`lambda:GetFunction`. The TEST verifier requests that alias, requires its returned
+ARN to identify `live` and its numeric `Version` to match the initially read alias,
+and verifies the complete configuration, ZIP digest and published-version list.
+It rereads the complete alias after those checks; movement, revision, routing or
+metadata changes reject the snapshot, even if the alias returns to the same
+version. This permits a separately reviewed read policy for only the exact alias
+ARN, without guessing future version numbers or granting a wildcard. Verify the
+effective IAM decision and preserve all other policies and role trust. Production
+verification continues to read the numeric TEST version under its separate policy.
+The native release operator never changes IAM.
+
+If CloudFormation completes but the qualified read fails, verify the live alias,
+published code digest, and exact denied IAM action before starting recovery. A
+failed postflight never provides production provenance. Once the exact qualified
+read is authorized, request a fresh protected review. If the currently deployed
+code pointer already matches, CloudFormation can return an empty change set. A
+subsequent source-only promotion that preserves the runtime ZIP can use the
+existing Code-pointer-only path with a new source revision. Verify that the
+review changes only the code pointer and that execution preserves the live alias
+and published version. A successful execution and immutable-alias check provide
+the release evidence.
 
 The dedicated THN v2 runtime maps server `ENVIRONMENT_NAME=prod|production` to
 canonical `production` and `test` to `test`. It requires exact journal-owner,

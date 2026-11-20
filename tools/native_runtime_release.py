@@ -315,9 +315,9 @@ def test_release_binding(snapshot, package):
         or identities.get("ConfigRuntimeReadFunctionAliaslive", {}).get("PhysicalResourceId") != arn + ":live"
         or identities.get(version_ref[0], {}).get("PhysicalResourceId") != arn + ":" + version): _reject()
     phase("test-qualified-version-read")
-    result = aws("lambda", "get-function", "--function-name", function, "--qualifier", version)
+    result = aws("lambda", "get-function", "--function-name", function, "--qualifier", "live")
     qualified = result["Configuration"]
-    if qualified.get("FunctionArn") != arn + ":" + version or qualified.get("Version") != version: _reject()
+    if qualified.get("FunctionArn") != arn + ":live" or qualified.get("Version") != version: _reject()
     identity_fields = {"FunctionArn", "RevisionId", "Version", "LastModified"}
     if {k:v for k,v in latest.items() if k not in identity_fields} != {k:v for k,v in qualified.items() if k not in identity_fields}: _reject()
     location = result["Code"]["Location"]
@@ -334,6 +334,7 @@ def test_release_binding(snapshot, package):
            or item.get("FunctionArn") != arn + ":" + item["Version"] for item in published): _reject()
     matches = [item for item in published if item["Version"] == version]
     if len(matches) != 1 or matches[0].get("CodeSha256") != qualified["CodeSha256"]: _reject()
+    if aws("lambda", "get-alias", "--function-name", function, "--name", "live") != alias: _reject()
     return {"alias": alias, "qualifiedConfiguration": qualified, "publishedVersions": published,
             "qualifiedZipSha256": digest.hex(), "identicalPackage": content == package}
 

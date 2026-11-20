@@ -121,6 +121,7 @@ jobs:
             .aws-sam/build/template.yaml
             .aws-sam/build/ConfigRuntimeReadFunction/lambda_function.py
             .aws-sam/build/ConfigRuntimeReadFunction/zoolanding_lambda_common.py
+            .aws-sam/build/ConfigRuntimeReadFunction/catalog_overlay.py
             .aws-sam/build-manifest.sha256
           if-no-files-found: error
           include-hidden-files: true
