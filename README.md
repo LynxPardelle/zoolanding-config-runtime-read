@@ -394,6 +394,17 @@ reviewed revision of the existing supplemental read policy. Verify effective IAM
 decisions for that exact qualifier and preserve all other policies and role trust;
 the native release operator does not automatically grant access to future versions.
 
+If CloudFormation completes but the qualified read fails, verify the live alias,
+published code digest, and exact denied IAM action before starting recovery. A
+failed postflight never provides production provenance. Once the exact qualified
+read is authorized, request a fresh protected review. If the currently deployed
+code pointer already matches, CloudFormation can return an empty change set. A
+subsequent source-only promotion that preserves the runtime ZIP can use the
+existing Code-pointer-only path with a new source revision. Verify that the
+review changes only the code pointer and that execution preserves the live alias
+and published version. A successful execution and immutable-alias check provide
+the release evidence.
+
 The dedicated THN v2 runtime maps server `ENVIRONMENT_NAME=prod|production` to
 canonical `production` and `test` to `test`. It requires exact journal-owner,
 `/auth-v2/runtime-config` and admin origin for that environment. Browser metadata
