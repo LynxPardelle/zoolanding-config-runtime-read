@@ -1,8 +1,11 @@
-"""Pure catalog merge. The caller supplies trusted ownership and verified source snapshots."""
+"""Approved catalog publication and editorial overlay for ZooBeriah Systems."""
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from decimal import Decimal
+import hashlib
+import json
 import re
 import unicodedata
 from urllib.parse import unquote, urlsplit
@@ -33,6 +36,143 @@ class CatalogOwnership:
 class CatalogSource:
     domain: str
     entries: Mapping[str, CatalogOwnership]
+
+
+CATALOG_DOMAIN = "zooberiahsystems.com"
+CATALOG_PAGES = {
+    "sitios-web": ("website", "catalog", "landingCards"),
+    "productos": ("app", "products", "productsList"),
+}
+CATALOG_SOURCES = {
+    "test": {
+        "draft:zoositioweb.com.mx": CatalogSource("zoositioweb.com.mx", {
+            "zoositioweb-com-mx": CatalogOwnership("zoositioweb-com-mx", "website", adopt_seed=True),
+        }),
+    },
+    "production": {},
+}
+
+
+def _uint(value: object) -> int:
+    if (type(value) is int or isinstance(value, Decimal) and value.is_finite() and value == value.to_integral_value()) and value >= 0:
+        return int(value)
+    raise ValueError("Invalid catalog revision number")
+
+
+def _current_projection(read_item, source_id: str, source: CatalogSource, environment: str) -> dict | None:
+    domain = source.domain
+    pk, sk = f"CATALOG#{environment}", f"SOURCE#DRAFT#{domain}"
+    projection = read_item(pk, sk)
+    if not isinstance(projection, dict) or projection.get("catalogState") != "declared":
+        return None
+    if (projection.get("pk") != pk or projection.get("sk") != sk or projection.get("sourceId") != source_id
+            or projection.get("sourceDomain") != domain or projection.get("environment") != environment):
+        return None
+
+    # Reading the pointer after the projection makes the verified revision current
+    # at the time of a strongly consistent registry read, even across concurrent writes.
+    metadata = read_item(f"SITE#{domain}", "METADATA")
+    if not isinstance(metadata, dict) or metadata.get("domain") != domain:
+        return None
+    lifecycle = metadata.get("lifecycle") or {}
+    if not isinstance(lifecycle, dict) or lifecycle.get("status", "active") != "active":
+        return None
+    pointers = metadata.get("publishedEnvironments")
+    pointer = pointers.get(environment) if isinstance(pointers, dict) else None
+    if not isinstance(pointer, dict):
+        return None
+    if environment == "production" and isinstance(metadata.get("published"), dict) and metadata["published"]:
+        if metadata["published"] != pointer:
+            return None
+    revision = pointer.get("catalogRevision")
+    if (not isinstance(revision, dict) or not all(isinstance(pointer.get(key), str) and pointer[key]
+                                                  and projection.get(key) == pointer[key] for key in ("versionId", "prefix"))):
+        return None
+
+    entries = projection.get("entries")
+    if not isinstance(entries, list) or len(entries) > 32:
+        return None
+    for entry in entries:
+        entry_id = entry.get("entryId") if isinstance(entry, dict) else None
+        owner = source.entries.get(entry_id) if isinstance(entry_id, str) else None
+        if owner is None or entry.get("kind") != owner.kind:
+            return None
+    digest = hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+    if (_uint(projection.get("schemaVersion")) != 1 or _uint(revision.get("schemaVersion")) != 1
+            or _uint(projection.get("entryCount")) != len(entries) or _uint(revision.get("entryCount")) != len(entries)
+            or projection.get("entriesSha256") != digest or revision.get("entriesSha256") != digest):
+        return None
+    sequence = _uint(revision.get("sequence"))
+    if not 0 < sequence <= _uint(metadata.get("revision")) or _uint(projection.get("sequence")) != sequence:
+        return None
+    return projection
+
+
+def _searchable_website(card: dict, previous: dict | None, category_labels: dict) -> None:
+    if card == previous:
+        return
+    category = card.get("category")
+    if category in category_labels:
+        card["categoryLabel"] = category_labels[category]
+    elif previous and category != previous.get("category"):
+        card.pop("categoryLabel", None)
+    card["searchText"] = " ".join(value for value in (
+        card["title"], card["description"], card.get("categoryLabel", category), urlsplit(card["url"]).hostname,
+    ) if value)
+
+
+def apply_catalog_overlay(environment: str, page_id: str, variables_payload: dict, page_config: dict,
+                          components_payload: dict, read_item) -> tuple[dict, dict]:
+    kind, variable, loop_id = CATALOG_PAGES[page_id]
+    sources = {
+        source_id: source for source_id, source in CATALOG_SOURCES.get(environment, {}).items()
+        if any(owner.kind == kind for owner in source.entries.values())
+    }
+    if not sources:
+        return variables_payload, page_config
+    components = components_payload.get("components", [])
+    if not any(component.get("id") == loop_id and component.get("type") == "container"
+               and (component.get("loopConfig") or {}).get("source") == "var"
+               and (component.get("loopConfig") or {}).get("path") == f"{variable}.items" for component in components):
+        return variables_payload, page_config
+    variables = variables_payload.get("variables", {})
+    seed = (variables.get(variable) or {}).get("items")
+    collections = (page_config.get("structuredData") or {}).get("entries", [])
+    matching = [index for index, entry in enumerate(collections) if isinstance(entry, dict) and entry.get("@type") == "CollectionPage"
+                and isinstance(entry.get("mainEntity"), dict) and entry["mainEntity"].get("@type") == "ItemList"]
+    if not isinstance(seed, list) or len(matching) != 1:
+        return variables_payload, page_config
+
+    projections = []
+    effective_sources = {}
+    for source_id, source in sources.items():
+        projection = _current_projection(read_item, source_id, source, environment)
+        if projection is None:
+            continue
+        effective_sources[source_id] = CatalogSource(source.domain, {
+            entry_id: owner for entry_id, owner in source.entries.items() if owner.kind == kind
+        })
+        projections.append({**projection, "entries": [entry for entry in projection["entries"] if entry["kind"] == kind]})
+    if not projections:
+        return variables_payload, page_config
+    items = merge_catalog_cards({kind: seed}, projections, effective_sources, environment)[kind]
+    if kind == "website":
+        old_cards = {card["id"]: card for card in seed}
+        category = next((component for component in components if component.get("id") == "landingCategory"), {})
+        labels = {option["value"]: option["label"] for option in (category.get("config") or {}).get("options", [])}
+        for card in items:
+            _searchable_website(card, old_cards.get(card["id"]), labels)
+
+    result = deepcopy(page_config)
+    result["structuredData"]["entries"][matching[0]]["mainEntity"]["itemListElement"] = [
+        {"@type": "ListItem", "position": index, "name": card["title"], "url": card["url"]}
+        for index, card in enumerate(items, 1)
+    ]
+    if kind == "app" and isinstance(result.get("analytics"), dict):
+        seed_ids = {card["id"] for card in seed}
+        other_sections = [section for section in result["analytics"].get("sectionIds", []) if section not in seed_ids]
+        result["analytics"]["sectionIds"] = list(dict.fromkeys([*other_sections, *[card["id"] for card in items]]))
+    return {**variables_payload, "variables": {**variables, variable: {**variables[variable], "items": items}}}, result
 
 
 def _slug(value: object, limit: int) -> bool:
