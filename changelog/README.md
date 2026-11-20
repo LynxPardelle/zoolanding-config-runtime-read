@@ -6,6 +6,7 @@ Use [../README.md](../README.md), code, tests, SAM configuration, and workflows 
 
 ## Migrated History
 
+- [Runtime TEST exact-alias package verification, 2026-11-19 CT](2026-11-19-runtime-test-alias-reader.md)
 - [THN production transform contract correction, 2026-10-02 CT](2026-10-02-thn-production-transform-contract.md)
 - [Runtime identical-package release, 2026-09-28 CT](2026-09-28-runtime-identical-package-release.md)
 - [Published locale isolation, 2026-09-07 CT](2026-09-07-published-locale-isolation.md)

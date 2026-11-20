@@ -388,11 +388,17 @@ version list and `live` alias binding, so a change to those bindings still stops
 promotion. The historical [identical-package release specification](docs/superpowers/specs/2026-09-28-runtime-identical-package-release.md)
 records the original stricter TEST policy before this narrowly bounded update.
 
-The TEST deployment role must be able to read the exact immutable version selected
-by `live` with `lambda:GetFunction`. A new published version can require a separately
-reviewed revision of the existing supplemental read policy. Verify effective IAM
-decisions for that exact qualifier and preserve all other policies and role trust;
-the native release operator does not automatically grant access to future versions.
+The TEST deployment role must be able to read the exact `live` alias with
+`lambda:GetFunction`. The TEST verifier requests that alias, requires its returned
+ARN to identify `live` and its numeric `Version` to match the initially read alias,
+and verifies the complete configuration, ZIP digest and published-version list.
+It rereads the complete alias after those checks; movement, revision, routing or
+metadata changes reject the snapshot, even if the alias returns to the same
+version. This permits a separately reviewed read policy for only the exact alias
+ARN, without guessing future version numbers or granting a wildcard. Verify the
+effective IAM decision and preserve all other policies and role trust. Production
+verification continues to read the numeric TEST version under its separate policy.
+The native release operator never changes IAM.
 
 If CloudFormation completes but the qualified read fails, verify the live alias,
 published code digest, and exact denied IAM action before starting recovery. A
