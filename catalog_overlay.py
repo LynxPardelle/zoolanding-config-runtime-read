@@ -43,13 +43,12 @@ CATALOG_PAGES = {
     "sitios-web": ("website", "catalog", "landingCards"),
     "productos": ("app", "products", "productsList"),
 }
+ZOOSITIOWEB_SOURCE = CatalogSource("zoositioweb.com.mx", {
+    "zoositioweb-com-mx": CatalogOwnership("zoositioweb-com-mx", "website", adopt_seed=True),
+})
 CATALOG_SOURCES = {
-    "test": {
-        "draft:zoositioweb.com.mx": CatalogSource("zoositioweb.com.mx", {
-            "zoositioweb-com-mx": CatalogOwnership("zoositioweb-com-mx", "website", adopt_seed=True),
-        }),
-    },
-    "production": {},
+    "test": {"draft:zoositioweb.com.mx": ZOOSITIOWEB_SOURCE},
+    "production": {"draft:zoositioweb.com.mx": ZOOSITIOWEB_SOURCE},
 }
 
 

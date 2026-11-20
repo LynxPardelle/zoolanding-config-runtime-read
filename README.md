@@ -39,7 +39,7 @@ This Lambda resolves the active site by domain and route, checks lifecycle statu
 
 ## ZooBeriah catalog
 
-The published bundles for `zooberiahsystems.com/sitios-web` and `/productos` can overlay an approved source on the authored catalog seed. `catalog_overlay.py` owns the runtime source registrations, scoped to one stack environment, canonical domain, entry ID and public card ID. TEST registers `zoositioweb.com.mx` for the existing ZooSitioWeb website card. Production requires a reviewed registration after the TEST pilot.
+The published bundles for `zooberiahsystems.com/sitios-web` and `/productos` can overlay an approved source on the authored catalog seed. `catalog_overlay.py` owns the runtime source registrations, scoped to one stack environment, canonical domain, entry ID and public card ID. TEST and production register `zoositioweb.com.mx` for the existing ZooSitioWeb website card. The production overlay takes effect after Authoring enrolls the exact production publisher and records a current projection.
 
 Runtime Read uses strongly consistent `GetItem` reads on its own registry table. It checks the current published pointer and the entries digest before using a projection. If a projection is missing, stale, legacy, or unavailable, the bundle uses the authored seed. A current declared snapshot can replace or retire the registered card. The same list feeds the page components, result count, search and `ItemList`. The products page activates only after its `productsList` loop is published, and its section IDs follow the list. Other routes use their existing payloads.
 

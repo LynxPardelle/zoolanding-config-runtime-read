@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import hashlib
 import json
 import unittest
@@ -44,7 +45,6 @@ def document(entries, *, version="v2", environment=ENVIRONMENT):
 
 class CatalogDeliveryTests(unittest.TestCase):
     def setUp(self):
-        self.source = CatalogSource(DOMAIN, {CARD_ID: CatalogOwnership(CARD_ID, "website", adopt_seed=True)})
         self.manual = [card("landing", "other.example.test"), card(CARD_ID, DOMAIN)]
 
     def bundle(self, projection, metadata, *, kind="website", domain=HUB, environment=ENVIRONMENT, stack=ENVIRONMENT, sources=None):
@@ -73,7 +73,8 @@ class CatalogDeliveryTests(unittest.TestCase):
                 self.assertIs(ConsistentRead, True)
                 return {"Item": projection if Key["pk"].startswith("CATALOG#") else metadata}
             get.side_effect = fetch
-            with patch("catalog_overlay.CATALOG_SOURCES", {environment: sources or {SOURCE_ID: self.source}}):
+            registration = nullcontext() if sources is None else patch("catalog_overlay.CATALOG_SOURCES", {environment: sources})
+            with registration:
                 bundle = runtime._published_bundle(
                     request_id="local", requested_domain=domain, domain=domain, resolved_alias=None, environment=environment,
                     version_id="hub", prefix="hub/", path=path, lang="es", lifecycle={}, site_metadata={},
@@ -93,6 +94,25 @@ class CatalogDeliveryTests(unittest.TestCase):
         list_items = bundle["pageConfig"]["structuredData"]["entries"][0]["mainEntity"]["itemListElement"]
         self.assertEqual(list_items[1], {"@type": "ListItem", "position": 2, "name": items[1]["title"], "url": items[1]["url"]})
         self.assertNotIn("entriesSha256", json.dumps(bundle))
+
+    def test_production_adopts_only_the_registered_zoositioweb_card(self):
+        projection, metadata = document([entry()], environment="production")
+        options = {"environment": "production", "stack": "prod"}
+        bundle, reads = self.bundle(projection, metadata, **options)
+        self.assertEqual(reads, 2)
+        items = bundle["variables"]["variables"]["catalog"]["items"]
+        self.assertEqual([item["id"] for item in items], ["landing", CARD_ID])
+        self.assertEqual(items[0], self.manual[0])
+        self.assertEqual(items[1]["description"], "New published content")
+        entries = bundle["pageConfig"]["structuredData"]["entries"][0]["mainEntity"]["itemListElement"]
+        self.assertEqual(sum(item["url"] == f"https://{DOMAIN}/" for item in entries), 1)
+
+        replay, _ = self.bundle(projection, metadata, **options)
+        self.assertEqual(replay, bundle)
+
+        unregistered, registry = document([entry(entry_id="unregistered-site")], environment="production")
+        rejected, _ = self.bundle(unregistered, registry, **options)
+        self.assertEqual(rejected["variables"]["variables"]["catalog"]["items"], self.manual)
 
     def test_disabled_and_missing_projections_have_distinct_outcomes(self):
         projection, metadata = document([entry(enabled=False)])
