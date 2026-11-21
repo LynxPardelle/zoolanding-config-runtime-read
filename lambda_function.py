@@ -1532,7 +1532,7 @@ class _ArticleHtmlContentProbe(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag in {"script", "style", "template", "head", "noscript"}:
             self.hidden_depth += 1
-        if not self.hidden_depth and tag in {"video", "audio", "picture"}:
+        if not self.hidden_depth and tag in {"video", "audio"}:
             self.media_depth += 1
         if not self.hidden_depth and (
             tag == "hr" or (tag in {"img", "video", "audio"} or tag == "source" and self.media_depth)
@@ -1543,7 +1543,7 @@ class _ArticleHtmlContentProbe(HTMLParser):
     def handle_endtag(self, tag):
         if tag in {"script", "style", "template", "head", "noscript"}:
             self.hidden_depth = max(0, self.hidden_depth - 1)
-        if tag in {"video", "audio", "picture"}:
+        if tag in {"video", "audio"}:
             self.media_depth = max(0, self.media_depth - 1)
 
     def handle_data(self, data):
