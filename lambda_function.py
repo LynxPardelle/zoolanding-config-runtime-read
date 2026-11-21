@@ -1,6 +1,7 @@
 import copy
 import os
 import re
+from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import unquote, urlparse
 
@@ -1519,6 +1520,58 @@ def _merge_content_hub_variables(
     return payload
 
 
+class _ArticleHtmlContentProbe(HTMLParser):
+    """Inspect content without changing the published HTML."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.has_content = False
+        self.hidden_depth = 0
+        self.media_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "template", "head", "noscript"}:
+            self.hidden_depth += 1
+        if not self.hidden_depth and tag in {"video", "audio", "picture"}:
+            self.media_depth += 1
+        if not self.hidden_depth and (
+            tag == "hr" or (tag in {"img", "video", "audio"} or tag == "source" and self.media_depth)
+            and any(name in {"src", "srcset", "poster"} and value and value.strip() for name, value in attrs)
+        ):
+            self.has_content = True
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "template", "head", "noscript"}:
+            self.hidden_depth = max(0, self.hidden_depth - 1)
+        if tag in {"video", "audio", "picture"}:
+            self.media_depth = max(0, self.media_depth - 1)
+
+    def handle_data(self, data):
+        if not self.hidden_depth and data.strip():
+            self.has_content = True
+
+
+def _has_renderable_content_hub_article_body(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if not isinstance(value, dict):
+        return False
+    # Match richTextHtmlOr precedence; an empty higher-priority format stays empty.
+    if isinstance(value.get("html"), str):
+        probe = _ArticleHtmlContentProbe()
+        probe.feed(value["html"])
+        probe.close()
+        return probe.has_content
+    if isinstance(value.get("text"), str):
+        return bool(value["text"].strip())
+    ops = value.get("ops")
+    # The current HTML reader ignores embed-only inserts and raw operation lists.
+    return isinstance(ops, list) and any(
+        isinstance(op, dict) and isinstance(op.get("insert"), str) and op["insert"].strip()
+        for op in ops
+    )
+
+
 def _merge_content_hub_bundle_variables(
     variables_payload: Optional[Dict[str, Any]],
     article_bundle: Optional[Dict[str, Any]],
@@ -1541,7 +1594,7 @@ def _merge_content_hub_bundle_variables(
             binding.get(key) and original_article.get(key) == current_article.get(key) == binding[key]
             for key in ("articleId", "path", "locale")
         )
-        and isinstance(content, (str, dict, list))
+        and _has_renderable_content_hub_article_body(content)
     ):
         # Replace the fallback atomically; merging Delta with old HTML changes which body is rendered.
         current_article["articleContent"] = copy.deepcopy(content)

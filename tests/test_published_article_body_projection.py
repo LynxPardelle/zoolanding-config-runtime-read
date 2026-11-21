@@ -84,6 +84,49 @@ class PublishedArticleBodyProjectionTest(unittest.TestCase):
                 result = runtime._merge_content_hub_bundle_variables(payload(), published)
                 self.assertEqual(result["variables"]["contentHub"]["currentArticle"]["articleContent"], ARTICLE["articleContent"])
 
+    def test_empty_or_malformed_body_preserves_the_valid_indexed_fallback(self):
+        for body in (
+            "", " \n\t", {}, [], ["text without an operation"], [{"insert": "Raw list is not rendered\n"}],
+            {"html": ""}, {"html": " \n\t"}, {"html": "<p><br></p>"}, {"html": "<p>&nbsp;</p>"},
+            {"html": '<source src="https://media.example.com/video.mp4">'},
+            {"text": ""}, {"text": " \n\t"}, {"ops": []}, {"ops": "invalid"},
+            {"ops": [{}]}, {"ops": [{"retain": 2}, {"delete": 1}]},
+            {"ops": [{"insert": " \n\t"}]}, {"ops": [{"insert": 5}]}, {"ops": [{"insert": {}}]},
+            {"ops": [{"insert": {"image": ""}}]}, {"ops": [{"insert": {"image": {"src": "invalid"}}}]},
+            {"ops": [{"insert": {"image": "https://assets.example.com/cover.webp"}}]},
+            {"ops": [{"insert": {"video": "https://media.example.com/video"}}]},
+            {"ops": [{"insert": {"formula": "E=mc^2"}}]},
+        ):
+            with self.subTest(body=body):
+                published, _ = load_published(body)
+                result = runtime._merge_content_hub_bundle_variables(payload(), published)
+                self.assertEqual(result["variables"]["contentHub"]["currentArticle"]["articleContent"], ARTICLE["articleContent"])
+
+    def test_empty_priority_format_cannot_be_rescued_by_another_format(self):
+        for body in (
+            {"html": "", "text": "Other format"},
+            {"html": "", "ops": [{"insert": "Other format\n"}]},
+            {"text": "", "ops": [{"insert": "Other format\n"}]},
+        ):
+            with self.subTest(body=body):
+                published, _ = load_published(body)
+                result = runtime._merge_content_hub_bundle_variables(payload(), published)
+                self.assertEqual(result["variables"]["contentHub"]["currentArticle"]["articleContent"], ARTICLE["articleContent"])
+
+    def test_renderable_legacy_text_html_and_complete_delta_are_copied_exactly(self):
+        for body in (
+            "Legacy plain text", {"text": "Legacy text object"}, {"html": "<p>Published HTML</p>"},
+            {"html": '<figure><img src="https://assets.example.com/cover.webp" alt="Cover"></figure>'},
+            {"html": '<video controls><source src="https://media.example.com/video.mp4"></video>'},
+            {"ops": [{"insert": "Delta list\n", "attributes": {"bold": True}}]},
+            {"ops": [{"insert": {"image": "https://assets.example.com/cover.webp"}}, {"insert": "Published caption\n"}]},
+        ):
+            with self.subTest(body=body):
+                published, _ = load_published(body)
+                expected = copy.deepcopy(published["variables"]["articleContent"])
+                result = runtime._merge_content_hub_bundle_variables(payload(), published)
+                self.assertEqual(result["variables"]["contentHub"]["currentArticle"]["articleContent"], expected)
+
     def test_unbound_package_does_not_replace_fallback(self):
         result = runtime._merge_content_hub_bundle_variables(payload(), {"variables": {"articleContent": {"html": "<p>Unbound body</p>"}}})
         self.assertEqual(result["variables"]["contentHub"]["currentArticle"]["articleContent"], ARTICLE["articleContent"])
