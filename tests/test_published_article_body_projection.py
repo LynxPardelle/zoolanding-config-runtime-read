@@ -89,6 +89,7 @@ class PublishedArticleBodyProjectionTest(unittest.TestCase):
             "", " \n\t", {}, [], ["text without an operation"], [{"insert": "Raw list is not rendered\n"}],
             {"html": ""}, {"html": " \n\t"}, {"html": "<p><br></p>"}, {"html": "<p>&nbsp;</p>"},
             {"html": '<source src="https://media.example.com/video.mp4">'},
+            {"html": '<picture><source srcset="https://assets.example.com/cover.webp"></picture>'},
             {"text": ""}, {"text": " \n\t"}, {"ops": []}, {"ops": "invalid"},
             {"ops": [{}]}, {"ops": [{"retain": 2}, {"delete": 1}]},
             {"ops": [{"insert": " \n\t"}]}, {"ops": [{"insert": 5}]}, {"ops": [{"insert": {}}]},
@@ -117,6 +118,7 @@ class PublishedArticleBodyProjectionTest(unittest.TestCase):
         for body in (
             "Legacy plain text", {"text": "Legacy text object"}, {"html": "<p>Published HTML</p>"},
             {"html": '<figure><img src="https://assets.example.com/cover.webp" alt="Cover"></figure>'},
+            {"html": '<picture><source srcset="https://assets.example.com/cover.webp"><img src="https://assets.example.com/fallback.webp" alt="Cover"></picture>'},
             {"html": '<video controls><source src="https://media.example.com/video.mp4"></video>'},
             {"ops": [{"insert": "Delta list\n", "attributes": {"bold": True}}]},
             {"ops": [{"insert": {"image": "https://assets.example.com/cover.webp"}}, {"insert": "Published caption\n"}]},
