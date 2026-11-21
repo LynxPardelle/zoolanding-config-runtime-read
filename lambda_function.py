@@ -1,6 +1,7 @@
 import copy
 import os
 import re
+from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import unquote, urlparse
 
@@ -1142,13 +1143,18 @@ def _content_hub_bundle_for_path(
                 locale,
                 article_id,
             )
+            if isinstance(bundle, dict) and bundle.get("locale") is not None and bundle["locale"] != locale:
+                return None
             published = _public_content_hub_bundle(bundle, article)
+            if published and article.get("locale") == locale:
+                # Internal proof from the validated storage key and article route, never public variables.
+                published["_articleBinding"] = {"articleId": article_id, "path": normalized_path, "locale": locale}
             if not shared or not published:
                 return published
             variables = published.get("variables", {})
             content = _shared_zoosite_content(variables.get("articleContent"))
             seo = published.get("seo", {})
-            return {"variables": {"articleContent": content}, "seo": {
+            return {"_articleBinding": published.get("_articleBinding"), "variables": {"articleContent": content}, "seo": {
                 "title": seo.get("title"),
                 "description": seo.get("description"),
                 "canonical": article.get("canonicalPath") or normalized_path,
@@ -1514,6 +1520,58 @@ def _merge_content_hub_variables(
     return payload
 
 
+class _ArticleHtmlContentProbe(HTMLParser):
+    """Inspect content without changing the published HTML."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.has_content = False
+        self.hidden_depth = 0
+        self.media_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "template", "head", "noscript"}:
+            self.hidden_depth += 1
+        if not self.hidden_depth and tag in {"video", "audio"}:
+            self.media_depth += 1
+        if not self.hidden_depth and (
+            tag == "hr" or (tag in {"img", "video", "audio"} or tag == "source" and self.media_depth)
+            and any(name in {"src", "srcset", "poster"} and value and value.strip() for name, value in attrs)
+        ):
+            self.has_content = True
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "template", "head", "noscript"}:
+            self.hidden_depth = max(0, self.hidden_depth - 1)
+        if tag in {"video", "audio"}:
+            self.media_depth = max(0, self.media_depth - 1)
+
+    def handle_data(self, data):
+        if not self.hidden_depth and data.strip():
+            self.has_content = True
+
+
+def _has_renderable_content_hub_article_body(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if not isinstance(value, dict):
+        return False
+    # Match richTextHtmlOr precedence; an empty higher-priority format stays empty.
+    if isinstance(value.get("html"), str):
+        probe = _ArticleHtmlContentProbe()
+        probe.feed(value["html"])
+        probe.close()
+        return probe.has_content
+    if isinstance(value.get("text"), str):
+        return bool(value["text"].strip())
+    ops = value.get("ops")
+    # The current HTML reader ignores embed-only inserts and raw operation lists.
+    return isinstance(ops, list) and any(
+        isinstance(op, dict) and isinstance(op.get("insert"), str) and op["insert"].strip()
+        for op in ops
+    )
+
+
 def _merge_content_hub_bundle_variables(
     variables_payload: Optional[Dict[str, Any]],
     article_bundle: Optional[Dict[str, Any]],
@@ -1523,7 +1581,23 @@ def _merge_content_hub_bundle_variables(
         return variables_payload
     payload = copy.deepcopy(variables_payload) if isinstance(variables_payload, dict) else {"version": 1, "variables": {}}
     variables = payload.get("variables") if isinstance(payload.get("variables"), dict) else {}
-    payload["variables"] = _deep_merge(variables, bundle_variables)
+    original_article = _content_hub_current_article(payload)
+    payload["variables"] = _deep_merge(variables, copy.deepcopy(bundle_variables))
+    binding = article_bundle.get("_articleBinding")
+    current_article = _content_hub_current_article(payload)
+    content = bundle_variables.get("articleContent")
+    if (
+        isinstance(binding, dict)
+        and original_article
+        and current_article
+        and all(
+            binding.get(key) and original_article.get(key) == current_article.get(key) == binding[key]
+            for key in ("articleId", "path", "locale")
+        )
+        and _has_renderable_content_hub_article_body(content)
+    ):
+        # Replace the fallback atomically; merging Delta with old HTML changes which body is rendered.
+        current_article["articleContent"] = copy.deepcopy(content)
     return payload
 
 
